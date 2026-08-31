@@ -100,56 +100,38 @@ Run the following commands using the `uv` toolchain:
 
 ---
 
-## 🔌 MCP Tools Provided
+## MCP Tools Provided
 
-### 1. `search_nodes`
-Fuzzy searches the metadata index.
-* **Parameters**:
-  * `keyword` (str): Search term.
-  * `type_filter` (str, optional): Restricts results to `function`, `class`, `file`, or `folder`.
-  * `max_results` (int, default: 50): Cap on results.
+The server exposes a single unified tool. Legacy standalone tools (`search_nodes`, `analyse_impact`, `trace_business_flow`, etc.) were removed — all capabilities are now via the query DSL.
 
-### 2. `analyse_impact`
-Maps the callers or callees of a specific code node at a given BFS depth.
-* **Parameters**:
-  * `node_id` (str): Unique node identifier in format `file_path:NodeName`.
-  * `direction` (str, default: `"callers"`): Direction of traversal (`"callers"` or `"callees"`).
-  * `depth` (int, default: `0`): BFS level depth (0 = unlimited).
+### `query_dsl` — Unified Code Graph Query
 
-### 3. `trace_business_flow`
-Traces logical workflows across modules starting from a given node.
-* **Parameters**:
-  * `start_node` (str): Unique node identifier to start tracing from.
-  * `workflow` (str, default: `"Business Flow"`): Name/label of the workflow.
-  * `exclude_framework` (bool, default: `true`): Exclude framework/library calls from trace.
-  * `business_only` (bool, default: `false`): Restrict trace to business-only domain components.
-  * `max_depth` (int, default: `5`): Maximum traversal depth.
-  * `show_module_boundaries` (bool, default: `true`): Highlights when the flow crosses module boundaries.
-  * `deduplicate_paths` (bool, default: `true`): Remove redundant duplicate execution paths.
+Executes a Cordyceps Query DSL string against the live CSR graph. All outputs are YAML.
 
-### 4. `trace_frontend_backend`
-Traces connections between frontend HTTP requests and backend Django endpoints.
-* **Parameters**:
-  * `api_endpoint` (str): The frontend API endpoint URL or backend URL pattern.
-  * `include_components` (bool, default: `true`): Whether to include the UI component nodes in the trace.
+**Parameters**
 
-### 5. `audit_tenant_isolation`
-Audits database and boundary separation to detect tenant isolation leaks.
-* **Parameters**:
-  * `module` (str, default: `"sales"`): The workspace module name to check.
-  * `check_type` (str, default: `"comprehensive"`): Type of audit checklist.
+* `raw` (str, required): DSL query string
+* `expand_body` (bool, default `false`): when `true` returns full `body`, otherwise `body_preview` (150 chars)
 
----
+`query_dsl_help` returns the full DSL grammar.
 
-## ✏️ Code Refactoring Services
+**DSL quick reference**
 
-The server includes internal services to execute safe editing of code nodes:
-* **`edit_node`**: Replaces the source body of a class/function with automated base indentation matching and isolated preflight syntax checking.
-* **`create_node`**: Appends classes or functions to files, guarding against project-wide naming collisions.
-* **`rename_node`**: Performs AST-safe renames of code identifiers (ignoring comments/strings) and propagates the change across all caller files mapped in the graph.
-* **`add_remove_imports`**: Inserts or removes import statements at the top of code files cleanly.
+| Query | Example | Purpose |
+|---|---|---|
+| `GET` | `GET functions WHERE name LIKE 'create_*' LIMIT 20` | Filtered listing with projections, `ORDER BY`, `LIMIT`/`OFFSET` |
+| `SEARCH` | `SEARCH "sale" IN functions WHERE file_path CONTAINS 'sales'` | Fuzzy / regex search |
+| `GLOB` | `GLOB "src/modules/sales/*.py"` | File glob |
+| `METADATA` | `METADATA FOR "src/api.py:create_sale"` | Full node metadata + callers/callees |
+| `IMPACT` | `IMPACT OF "src/services.py:create_sale" DIRECTION callers DEPTH 2` | Blast radius (callers/callees) |
+| `PATH` | `PATH FROM "a.py:foo" TO "b.py:bar"` | Shortest dependency path |
+| `FLOW` | `FLOW FOR "src/api.py:create_sale" DEPTH 5` | Business-flow tree |
+| `STACK` | `STACK FOR "/api/sales"` | Frontend hook → backend handler trace |
+| `AUDIT` | `AUDIT FOR sales` | Tenant-isolation audit |
+| `STATS` | `STATS FOR "src/modules/sales"` | Module stats (LOC, counts) |
+| `CHECK LAYERS` | `CHECK LAYERS "domain" AGAINST "infra"` | Architecture layer violation check |
 
-All edits generate safety backups (`.bak` files) before mutating target code.
+All legacy search / impact / flow / full-stack / audit capabilities are available through `query_dsl` with the appropriate verb — see `query_dsl_help` for the complete grammar.
 
 ---
 
