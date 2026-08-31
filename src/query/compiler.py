@@ -2318,6 +2318,19 @@ def _build_path_hint(all_file_paths: set, given_layer: str) -> str:
     return f"No files found in layer '{given_layer}'. Check your path prefix (e.g. 'domain/' vs 'pos_caisse/domain/')."
 
 
+def _layers_of_example(all_file_paths: set) -> str:
+    """Return a valid LAYERS OF example based on an indexed directory."""
+    directories = {
+        os.path.dirname(path.replace("\\", "/")).strip("/")
+        for path in all_file_paths
+        if os.path.dirname(path.replace("\\", "/")).strip("/")
+    }
+    if not directories:
+        return 'LAYERS OF "src"'
+    candidate = min(directories, key=lambda path: (len(path.split("/")), path))
+    return f'LAYERS OF "{candidate}"'
+
+
 def compile_check_layers(client: Any, query: CheckLayersQuery) -> dict:
     """Check if files in one layer import from a forbidden layer (Clean Architecture violations)."""
     all_meta = client.get_all_metadata()
@@ -2411,7 +2424,15 @@ def compile_layers_of(client: Any, query: LayersOfQuery) -> dict:
 
     if files_analyzed == 0:
         hint = _build_path_hint(all_file_paths, layer)
-        return {"ok": False, "error": hint, "query_type": "LAYERS_OF", "layer": layer}
+        example = _layers_of_example(all_file_paths)
+        if layer in ("", ".", "./"):
+            hint = "Root is not a layer; provide an indexed directory path."
+        return {
+            "ok": False,
+            "error": f"{hint} Example: {example}",
+            "query_type": "LAYERS_OF",
+            "layer": layer,
+        }
 
     # Convert sets to sorted lists
     result = {"files_analyzed": files_analyzed, "dependencies": {}}

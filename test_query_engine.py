@@ -2316,6 +2316,26 @@ class TestBugfixBatch:
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
+    def test_layers_of_root_error_includes_valid_query_example(self):
+        from src.query import query
+        from src.database.graph_client import EngramClient
+        import tempfile
+        import shutil
+
+        tmpdir = tempfile.mkdtemp()
+        try:
+            client = EngramClient(tmpdir)
+            client.add_node("src/modules/sales/api.py", "File", "api.py",
+                            "src/modules/sales/api.py", lines={"start": 1, "end": 20})
+            client.build()
+
+            res = query(client, "LAYERS OF '.'")
+            assert res["ok"] is False
+            assert "Root is not a layer" in res["error"]
+            assert 'Example: LAYERS OF "src/modules/sales"' in res["error"]
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
     def test_glob_extglob_negation(self):
         """GLOB !(comptabilite) must exclude that single segment (previously
         matched nothing because the lookahead anchored $ to end-of-string)."""
