@@ -29,6 +29,26 @@ from .compiler import compile_get, compile_search, compile_glob, compile_metadat
 
 logger = logging.getLogger(__name__)
 
+
+def _query_example_hint(raw: str) -> str:
+    """Return one concise, relevant example for normal DSL input mistakes."""
+    first = raw.strip().split(maxsplit=1)[0].upper() if raw.strip() else ""
+    examples = {
+        "GET": ' Example: GET functions WHERE name LIKE "create_*" LIMIT 20',
+        "SEARCH": ' Example: SEARCH "create_sale" IN functions',
+        "GLOB": ' Example: GLOB "**/*.py"',
+        "METADATA": ' Example: METADATA FOR "src/api.py:create_sale"',
+        "IMPACT": ' Example: IMPACT OF "src/services.py:create_sale" DIRECTION callers DEPTH 2',
+        "PATH": ' Example: PATH FROM "a.py:foo" TO "b.py:bar"',
+        "FLOW": ' Example: FLOW FOR "src/api.py:create_sale" DEPTH 5',
+        "STACK": ' Example: STACK FOR "/api/sales"',
+        "STATS": ' Example: STATS or STATS FOR "src/modules/sales"',
+        "CHECK": ' Example: CHECK LAYERS "domain" AGAINST "infrastructure"',
+        "FIND": ' Example: FIND DECORATED WITH "@dataclass"',
+        "ENFORCE": ' Example: ENFORCE "domain MUST_NOT_IMPORT infrastructure"',
+    }
+    return examples.get(first, ' Start with: STATS, SEARCH "symbol" IN functions, or GLOB "**/*.py"')
+
 def _truncate_bodies_in_result(data, expand_body: bool = False):
     """
     Recursively scans the returned dictionary/list. If expand_body is False,
@@ -115,7 +135,7 @@ def query(client: object, raw: str, expand_body: bool = False) -> dict:
         # Client-side syntax mistakes are normal tool-input errors, not server
         # faults: log one concise line (full detail goes back in the response).
         logger.warning("Rejected malformed query (%s): %.200r", type(e).__name__, raw)
-        return {"ok": False, "error": err}
+        return {"ok": False, "error": err + _query_example_hint(raw)}
 
     try:
         if isinstance(parsed, GetQuery):

@@ -298,6 +298,21 @@ BOOLEAN.2: "true"i | "false"i
 def query_dsl(raw: str, expand_body: bool = False) -> str:
     """Execute a Cordyceps Query DSL string against the code graph.
 
+    Start with these common, copy-ready queries:
+      - Project summary: STATS
+      - Find a symbol: SEARCH "create_sale" IN functions
+      - List Python files: GLOB "**/*.py"
+      - Inspect a node: METADATA FOR "src/api.py:create_sale"
+      - Find callers before editing: IMPACT OF "src/services.py:create_sale" DIRECTION callers DEPTH 2
+      - Follow a flow: FLOW FOR "src/api.py:create_sale" DEPTH 5
+      - Trace a frontend API: STACK FOR "/api/sales"
+      - Find a shortest dependency path: PATH FROM "a.py:foo" TO "b.py:bar"
+      - Architecture check: CHECK LAYERS "domain" AGAINST "infrastructure"
+      - Count functions: GET COUNT(*) FROM functions WHERE file_path CONTAINS "src"
+
+    Call query_dsl_help for the complete grammar. Parse errors include a relevant
+    example to help construct the next query.
+
     Parameters:
       - raw: The query DSL string.
       - expand_body: If True, returns full 'body' contents in results. If False (default), returns a truncated 'body_preview'.

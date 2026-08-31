@@ -492,6 +492,15 @@ class TestCompileGet:
         result = query(db.client, "INVALID QUERY HERE")
         assert result["ok"] is False
         assert "Parse error" in result["error"]
+        assert 'Start with: STATS' in result["error"]
+
+    def test_parse_error_includes_command_specific_example(self):
+        from src.query import query
+        from src.database import get_graph_db
+
+        result = query(get_graph_db().client, "IMPACT broken")
+        assert result["ok"] is False
+        assert 'Example: IMPACT OF "src/services.py:create_sale"' in result["error"]
 
     def test_empty_query(self):
         from src.query import query
