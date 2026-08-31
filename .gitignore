@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+.eggs/
+dist/
+build/
+*.bak
+
+# Virtual envs
+.venv/
+venv/
+env/
+.env
+.venv*/
+
+# Cordyceps runtime artifacts
+.engram_snapshot.bin
+.cordyceps_index_meta.json
+
+# OpenCode local config (contains machine-specific absolute paths)
+opencode.jsonc
+opencode.json
+
+# Lockfile (local editable path ../engramedb, regenerate via uv sync)
+uv.lock
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+*.swp
+*.swo
+.pytest_cache/
+.hypothesis/
+coverage/
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+.envrc

@@ -1,0 +1,1077 @@
+\documentclass[12pt,a4paper]{article}
+
+% ---- Packages ----
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[french]{babel}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{geometry}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{tikz}
+\usepackage{tabularx}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{float}
+\usepackage{verbatim}
+\usepackage{minted}
+\usepackage{amsmath}
+\usepackage{amssymb}
+
+\geometry{margin=2.5cm}
+
+% ---- Colors ----
+\definecolor{codebg}{rgb}{0.95,0.95,0.95}
+\definecolor{rustorange}{RGB}{222,100,30}
+\definecolor{pyblue}{RGB}{70,130,180}
+\definecolor{dslgreen}{RGB}{34,139,34}
+\definecolor{lightgray}{rgb}{0.85,0.85,0.85}
+
+% ---- Listing styles ----
+\lstset{
+    backgroundcolor=\color{codebg},
+    basicstyle=\ttfamily\small,
+    breaklines=true,
+    frame=single,
+    numbers=left,
+    numberstyle=\tiny,
+    tabsize=4,
+    captionpos=b,
+}
+
+% ---- Custom commands ----
+\newcommand{\code}[1]{\texttt{#1}}
+\newcommand{\rust}{\textcolor{rustorange}{Rust}}
+\newcommand{\python}{\textcolor{pyblue}{Python}}
+\newcommand{\dsl}{\textcolor{dslgreen}{DSL}}
+
+% ---- Title page ----
+\title{\textbf{Rapport d'Analyse Technique} \\ \large Cordyceps Search : Moteur de Recherche Sémantique \\ et d'Analyse d'Impact Multi-Langage}
+\author{Équipe de Recherche \\ \texttt{ghassen@desktop}}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+\thispagestyle{empty}
+\newpage
+
+\tableofcontents
+\newpage
+
+% ======================================================================
+\section{Introduction}
+% ======================================================================
+
+\paragraph{Présentation}
+Cordyceps Search est un serveur MCP (\textit{Model Context Protocol}) haute performance dédié à la recherche sémantique de code source, l'analyse de dépendances, et le refactoring assisté par AST. Il combine un moteur de graphe natif \rust{} avec des parseurs \python{} basés sur \texttt{tree-sitter} pour offrir une compréhension structurelle instantanée du code.
+
+\paragraph{Objectifs}
+\begin{itemize}
+    \item Recherche floue et SQL-like dans le graphe de code
+    \item Analyse de l'impact (blast radius) via parcours BFS
+    \item Traçage de flux métier (\textit{business flow tracing})
+    \item Traçage full-stack (React → Django)
+    \item Audit de sécurité multi-tenant
+    \item Refactoring AST-aware avec validation syntaxique
+    \item Synchronisation temps réel via file watcher
+\end{itemize}
+
+\paragraph{Métriques clés du projet}
+\begin{center}
+\begin{tabular}{ll}
+    \toprule
+    \textbf{Métrique} & \textbf{Valeur} \\
+    \midrule
+    Langage principal & Python 3.11+ \\
+    Moteur natif & Rust (PyO3 + Maturin) \\
+    Parseur AST & tree-sitter (Python, JS, TS, JSX, TSX) \\
+    Base de données graphe & CSR (Compressed Sparse Row) \\
+    Format de sortie & YAML \\
+    Tests unitaires & 90 (Python) + 11 (Rust) \\
+    Dépendances & 9 librairies Python \\
+    \bottomrule
+\end{tabular}
+\end{center}
+
+% ======================================================================
+\section{Architecture Générale}
+% ======================================================================
+
+\subsection{Vue d'ensemble}
+
+L'architecture de Cordyceps Search s'organise en cinq couches distinctes :
+
+\begin{center}
+\begin{tikzpicture}[node distance=1.8cm, auto]
+
+% Couches
+\tikzstyle{layer}=[rectangle, draw, minimum width=12cm, minimum height=1cm, rounded corners, font=\bfseries]
+\tikzstyle{comp}=[rectangle, draw, minimum width=5.5cm, minimum height=0.8cm, fill=codebg, font=\small]
+
+% Couche 1 - MCP
+\node[draw, fill=blue!10, minimum width=13.5cm, minimum height=2.8cm, rounded corners] (mcp) {};
+\node[above] at (mcp.north) {\textbf{Couche MCP — main.py}};
+\node[comp] (tool) at (0,0.3) {\code{@mcp.tool() query\_dsl(raw)}};
+\node[comp] (scan) at (0,-0.7) {Initial Scan → ThreadPoolExecutor};
+
+% Couche 2 - Services
+\node[draw, fill=green!10, minimum width=13.5cm, minimum height=2.8cm, rounded corners, below=of mcp] (svc) {};
+\node[above] at (svc.north) {\textbf{Couche Services — src/services/}};
+\node[comp] (gs) at (0,0.3) {\code{graph\_service.py}: BFS, Flow, Stack};
+\node[comp] (es) at (0,-0.7) {\code{editor\_service.py}: Edit/Rename/Create};
+
+% Couche 3 - Query DSL
+\node[draw, fill=orange!10, minimum width=13.5cm, minimum height=2.8cm, rounded corners, below=of svc] (q) {};
+\node[above] at (q.north) {\textbf{Couche DSL — src/query/}};
+\node[comp] (gram) at (0,0.3) {\code{grammar.lark} → LALR Parser};
+\node[comp] (compil) at (0,-0.7) {\code{compiler.py} → 14 types de requêtes};
+
+% Couche 4 - Database
+\node[draw, fill=purple!10, minimum width=13.5cm, minimum height=2.8cm, rounded corners, below=of q] (db) {};
+\node[above] at (db.north) {\textbf{Couche Database — src/database/}};
+\node[comp] (ec) at (0,0) {\code{EngramClient} → Pont Python/Rust};
+
+% Couche 5 - Rust Engine
+\node[draw, fill=red!10, minimum width=13.5cm, minimum height=2.8cm, rounded corners, below=of db] (rust) {};
+\node[above] at (rust.north) {\textbf{Cœur Rust — engram\_core/}};
+\node[comp] (meta) at (0,0.5) {\code{MetadataEngine}: HashMap O(1)};
+\node[comp] (csr) at (0,-0.3) {\code{CsrGraph}: BFS microsecondes};
+\node[comp] (sto) at (0,-1.1) {\code{MmapStore} + \code{CasStore} + Bincode};
+
+\end{tikzpicture}
+\end{center}
+
+\subsection{Flux de Données}
+
+Le flux d'exécution d'une requête typique suit ce pipeline :
+
+\begin{lstlisting}
+1. Client MCP → query_dsl(raw)
+2.    → _drain_sync_queue()       # Traite les événements files en attente
+3.    → get_graph_db()            # Singleton factory
+4.    → parse_query(raw)          # Lark LALR → AST dataclass
+5.    → compile_*(...)            # Dispatch vers le compilateur adapté
+6.        → appels Rust via PyO3  # CSR BFS / Metadata O(1)
+7.    → to_yaml(result)          # yaml.dump(sort_keys=False)
+8.    → Retour YAML → Client
+\end{lstlisting}
+
+% ======================================================================
+\section{Moteur Rust — engram\_core}
+% ======================================================================
+
+\subsection{Présentation}
+
+Le cœur du système est écrit en \rust{}. Il est publié sur PyPI sous le nom \code{engramedb} et importé comme \code{engramdb}. La construction utilise \textbf{Maturin} et \textbf{PyO3} pour l'interface Python/Rust.
+
+\subsection{Dépendances Rust}
+
+\begin{center}
+\begin{tabularx}{\textwidth}{lXl}
+\toprule
+\textbf{Crate} & \textbf{Rôle} & \textbf{Version} \\
+\midrule
+\code{pyo3} & Binding Python↔Rust (extension-module) & 0.21.2 \\
+\code{blake3} & Hachage cryptographique 32 octets & 1.8.5 \\
+\code{memmap2} & Fichiers mappés en mémoire (zero-copy) & 0.9.10 \\
+\code{rkyv} & Sérialisation zero-copy (archived types) & 0.8.16 \\
+\code{thiserror} & Dérivation ergonomique d'erreurs & 2.0.18 \\
+\code{hex} & Encodage/décodage hexadécimal & 0.4.3 \\
+\code{serde} + \code{serde\_json} & Sérialisation framework + JSON & 1.0 \\
+\code{bincode} & Sérialisation binaire compacte & 1.0 \\
+\code{log} & Facade de logging & 0.4 \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\subsection{Types Fondamentaux}
+
+Les types de base définis dans \code{src/core/types.rs} :
+
+\begin{minted}{rust}
+pub type Hash = [u8; 32];         // Blake3 content hash
+pub type BlockId = u64;            // Offset dans le fichier mmap
+pub type VectorId = u64;           // ID pour vector store (HNSW)
+
+#[derive(Archive, Deserialize, Serialize, Debug, PartialEq, Eq, Clone, Copy)]
+pub enum NodeType {
+    File, Class, Function, Method, Variable, Import, Unknown,
+}
+
+#[derive(Archive, Deserialize, Serialize, Debug, PartialEq, Clone)]
+pub struct Node {
+    pub node_type: NodeType,
+    pub hash: Hash,
+    pub name: String,
+    pub calls: Vec<BlockId>,      // Pointeurs d'adjacence
+    pub vector_id: Option<VectorId>,
+    pub start_line: u32,
+    pub end_line: u32,
+}
+\end{minted}
+
+Points clés :
+\begin{itemize}
+    \item Les \code{Node}s utilisent \code{rkyv} pour la désérialisation zero-copy depuis la mémoire mappée.
+    \item Le champ \code{calls} stocke des offsets physiques (\code{BlockId}) dans le fichier append-only.
+    \item Le hachage Blake3 sert de clé d'identification unique et de pont entre MetadataEngine et CSR Graph.
+\end{itemize}
+
+\subsection{Couche de Stockage}
+
+\subsubsection{MmapStore (\code{src/storage/mmap\_store.rs})}
+
+Magasin de nœuds append-only avec fichier mappé en mémoire :
+
+\begin{minted}{rust}
+pub struct MmapStore {
+    file: File,
+    mmap: MmapMut,
+    tail: u64,                // Position d'écriture courante
+}
+\end{minted}
+
+Méthodes principales :
+\begin{itemize}
+    \item \code{new(path, initial\_size)} — Crée/ouvre le fichier et le mappe en mémoire.
+    \item \code{append\_node(node)} — Sérialise avec \code{rkyv}, écrit au \code{tail}, retourne \code{(BlockId, length)}.
+    \item \code{get\_node\_unchecked(block\_id)} — Appel \code{rkyv::access\_unchecked} → référence directe dans le mmap. \textbf{Zero deserialization cost}.
+    \item Redimensionnement automatique : double la taille du fichier si nécessaire.
+\end{itemize}
+
+\subsubsection{CasStore (\code{src/storage/cas\_store.rs})}
+
+Cache de déduplication \textit{Content-Addressable Storage} :
+
+\begin{minted}{rust}
+pub struct CasStore {
+    map: HashMap<Hash, BlockId>,
+}
+\end{minted}
+
+Simple \code{HashMap<Hash, BlockId>} qui évite de stocker deux fois des nœuds AST identiques (partage structurel).
+
+\subsection{Graphe CSR (\code{src/graph/csr.rs})}
+
+Composant critique pour la performance : un graphe \textbf{Compressed Sparse Row} bidirectionnel.
+
+\subsubsection{Constructeur : CsrGraphBuilder}
+
+\begin{minted}{rust}
+pub struct CsrGraphBuilder {
+    node_to_index: HashMap<Hash, NodeIndex>,
+    index_to_hash: Vec<Hash>,
+    callers_adj: Vec<Vec<NodeIndex>>,
+    callees_adj: Vec<Vec<NodeIndex>>,
+}
+\end{minted}
+
+\begin{itemize}
+    \item \code{get\_or\_insert(hash)} → attribue des IDs séquentiels aux hashs.
+    \item \code{add\_edge(from, to)} → met à jour les deux listes d'adjacence (\textbf{invariant bidirectionnel}).
+    \item \code{remove\_edges\_for(hash)} → complexité \textbf{O(d)} (uniquement les voisins directs).
+    \item \code{build()} → compile les listes en tableaux plats CSR.
+\end{itemize}
+
+\subsubsection{Graphe Compilé : CsrGraph}
+
+\begin{minted}{rust}
+pub struct CsrGraph {
+    node_to_index: HashMap<Hash, NodeIndex>,
+    index_to_hash: Vec<Hash>,
+    caller_offsets: Vec<usize>,
+    caller_edges: Vec<NodeIndex>,
+    callee_offsets: Vec<usize>,
+    callee_edges: Vec<NodeIndex>,
+}
+\end{minted}
+
+Format CSR : \code{offsets[i]} = début dans \code{edges} pour le nœud i. Permet un parcours à \textbf{cache-friendly} (tableaux plats contigus).
+
+Opérations :
+\begin{itemize}
+    \item \code{callers(hash)} → O(1) + O(k) voisins directs.
+    \item \code{callees(hash)} → idem.
+    \item \code{blast\_radius(hash, max\_depth)} → BFS sur arêtes appelantes (ascendant).
+    \item \code{recursive\_callees(hash, max\_depth)} → BFS sur arêtes appelées (descendant).
+\end{itemize}
+
+BFS implémente un \code{VecDeque} avec masque de visite \code{Vec<bool>} et niveaux de profondeur.
+
+\subsection{Moteur de Métadonnées (\code{src/metadata/engine.rs})}
+
+Index riche en mémoire stockant toutes les métadonnées sémantiques.
+
+\subsubsection{NodeMeta}
+
+\begin{minted}{rust}
+pub struct NodeMeta {
+    pub node_id: String,
+    pub node_type: String,
+    pub name: String,
+    pub file_path: String,
+    pub signature: Option<String>,
+    pub docstring: Option<String>,
+    pub lines_start: Option<u32>,
+    pub lines_end: Option<u32>,
+    pub returns: Option<Vec<String>>,
+    pub calls: Option<Vec<String>>,
+    pub django_relations_json: Option<String>,
+    pub calls_count: Option<u32>,
+    pub callers_count: Option<u32>,
+    pub lines_count: Option<u32>,
+    pub is_async: Option<bool>,
+    pub is_generator: Option<bool>,
+    pub param_count: Option<u32>,
+    pub is_exported: Option<bool>,
+    pub blast_radius_score: Option<u32>,
+    pub extra_json: Option<String>,
+}
+\end{minted}
+
+\subsubsection{Structure d'Indexation}
+
+\begin{minted}{rust}
+pub struct MetadataEngine {
+    nodes: HashMap<String, NodeMeta>,           // node_id → meta
+    name_index: HashMap<String, Vec<String>>,   // lowercase name → [node_ids]
+    file_index: HashMap<String, Vec<String>>,   // file_path → [node_ids]
+    id_to_hash: HashMap<String, String>,        // node_id → hex_hash
+    hash_to_id: HashMap<String, String>,        // hex_hash → node_id
+}
+\end{minted}
+
+\begin{center}
+\begin{tabularx}{\textwidth}{lXl}
+\toprule
+\textbf{Méthode} & \textbf{Description} & \textbf{Complexité} \\
+\midrule
+\code{add\_node} & Insertion dans les 5 index & O(1) \\
+\code{invalidate\_file} & Suppression de tous les nœuds d'un fichier & O(k) \\
+\code{search} & Scan linéaire avec priorité exacte & O(N) \\
+\code{resolve\_identifiers} & Résolution par nom avec scope module & O(n) \\
+\code{get\_node} & Lookup par clé primaire & O(1) \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\subsection{Persistance (\code{src/metadata/persistence.rs})}
+
+Snapshots binaires remplaçant l'approche JSON Python :
+
+\begin{center}
+\begin{tabularx}{\textwidth}{lXXX}
+\toprule
+\textbf{Métrique} & \textbf{EngramDB (Rust/bincode)} & \textbf{Ancien (Python/JSON)} & \textbf{Gain} \\
+\midrule
+Sérialisation 50k nœuds & $\sim$10 ms & $\sim$5000 ms & ×500 \\
+Désérialisation 50k nœuds & $\sim$15 ms & $\sim$3000 ms & ×200 \\
+Taille fichier 50k nœuds & $\sim$5 MB & $\sim$30 MB & ×6 \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+Format du fichier \code{.engram\_snapshot.bin} :
+\begin{lstlisting}
+Magic bytes: "EGRM" (4 octets)
+Version byte: 1 (1 octet)
+Body: bincode-serialized MetadataEngine
+\end{lstlisting}
+
+La sauvegarde asynchrone est effectuée sur un thread background :
+\begin{minted}{rust}
+pub fn build(&self) -> PyResult<()> {
+    let snapshot_bytes = {
+        let mut state = self.inner.write().unwrap();
+        state.graph = Some(state.builder.build());
+        Self::update_metrics_internal(&mut state);
+        persistence::serialize_to_bytes(&state.engine)?
+    };
+    std::thread::spawn(move || {
+        persistence::write_snapshot_bytes(&workspace, snapshot_bytes)
+    });
+    Ok(())
+}
+\end{minted}
+
+\subsection{Bindings PyO3 (\code{src/python/bindings.rs})}
+
+Trois classes exposées à \python{} :
+
+\begin{enumerate}
+    \item \code{PyMmapStore} — Stockage bas niveau (debug/test).
+    \item \code{PyGraphEngine} — Legacy (rétrocompatibilité).
+    \item \textbf{\code{PyMetadataEngine}} — Classe principale unifiée.
+\end{enumerate}
+
+\subsubsection{Sécurité Multi-Thread}
+
+\begin{minted}{rust}
+pub struct PyMetadataEngine {
+    inner: Arc<RwLock<InnerEngineState>>,
+    workspace_path: String,
+}
+\end{minted}
+
+\begin{center}
+\begin{tabularx}{\textwidth}{lX}
+\toprule
+\textbf{Type d'opération} & \textbf{Verrrou} \\
+\midrule
+Lectures (\code{search}, \code{blast\_radius}, \code{get\_node\_meta}) & \code{read()} — concurrent \\
+Écritures (\code{add\_node}, \code{build}, \code{invalidate\_file}) & \code{write()} — exclusif \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\textbf{Design note :} Pas de \code{py.allow\_threads()} car les opérations sont sub-milliseconde — relâcher le GIL causerait un deadlock GIL+Mutex.
+
+% ======================================================================
+\section{Point d'Entrée MCP — main.py}
+% ======================================================================
+
+\subsection{Configuration du Serveur}
+
+\begin{minted}{python}
+mcp = FastMCP("CordycepsSearch")
+# Transport: stdio
+mcp.run(transport="stdio")
+\end{minted}
+
+\subsection{Enregistrement d'Outils}
+
+Un seul outil MCP est enregistré : \code{query\_dsl}.
+
+\begin{minted}{python}
+@mcp.tool()
+def query_dsl(raw: str, expand_body: bool = False) -> str:
+    _drain_sync_queue()
+    db = get_graph_db()
+    result = _query_engine(db.client, raw, expand_body=expand_body)
+    return to_yaml(result)
+\end{minted}
+
+\subsection{Scan Initial (lignes 149-217)}
+
+\begin{enumerate}
+    \item \textbf{Découverte} : \code{os.walk()} trouve les fichiers sources (exclut \code{node\_modules}, \code{venv}, etc.)
+    \item \textbf{Parsing multi-threadé} : \code{ThreadPoolExecutor(cpu\_count)} exécute \code{tree-sitter} en parallèle.
+    \item \textbf{Injection single-threaded} : les résultats sont injectés dans le graphe un par un.
+    \item \textbf{Post-traitement} : \code{repopulate\_edges()} → \code{resolve\_django\_relations()} → \code{resolve\_url\_patterns()} → \code{resolve\_api\_calls()} → \code{clean\_stale\_files()} → \code{build()}
+    \item \textbf{Watchdog} : \code{PollingObserver} démarre pour les mises à jour temps réel.
+\end{enumerate}
+
+\subsection{Pompe à Événements : \_drain\_sync\_queue()}
+
+Pont critique entre le file watcher (threads watchdog) et les handlers MCP (thread principal) :
+
+\begin{enumerate}
+    \item Vide la file d'événements (\code{queue.Queue}).
+    \item Pour chaque événement : \code{update\_file\_in\_graph()} ou \code{remove\_file\_from\_graph()}.
+    \item Si des fichiers frontend/backend ont changé : \code{repopulate\_edges()} + \code{resolve\_api\_calls()}.
+    \item Toujours : \code{rebuild()} en fin de cycle.
+\end{enumerate}
+
+% ======================================================================
+\section{Query DSL}
+% ======================================================================
+
+\subsection{Présentation}
+
+Le DSL (\textit{Domain-Specific Language}) est un langage de requête unifié de type SQL permettant d'interroger le graphe de code. Il est défini par une grammaire \textbf{Lark LALR} et implémente 14 types de requêtes.
+
+\subsection{Grammaire (\code{src/query/grammar.lark})}
+
+La grammaire Lark (172 lignes) définit 14 types de requêtes :
+
+\begin{center}
+\begin{tabularx}{\textwidth}{lX}
+\toprule
+\textbf{Requête} & \textbf{Syntaxe} \\
+\midrule
+GET & \code{GET [projection] <type> WHERE <expr> [WITH ...] [LIMIT n] [ORDER BY ...]} \\
+SEARCH & \code{SEARCH "<pattern>" IN <type> WHERE <expr> [ORDER BY ...]} \\
+GLOB & \code{GLOB "<pattern>" WHERE <expr> [ORDER BY ...] [LIMIT n]} \\
+METADATA & \code{METADATA FOR '<node\_id>'} \\
+IMPACT & \code{IMPACT OF '<node\_id>' [DIRECTION callers|callees] [DEPTH n]} \\
+PATH & \code{PATH FROM '<start>' TO '<end>'} \\
+FLOW & \code{FLOW FOR '<node\_id>' [DEPTH n]} \\
+STACK & \code{STACK FOR '<api\_endpoint>'} \\
+AUDIT & \code{AUDIT TENANT [module\_name]} \\
+CHECK LAYERS & \code{CHECK LAYERS '<layer>' AGAINST '<forbidden>'} \\
+LAYERS OF & \code{LAYERS OF '<layer>'} \\
+FIND IMPLEMENTS & \code{FIND IMPLEMENTS '<interface>'} \\
+FIND DECORATED & \code{FIND DECORATED WITH '<decorator>'} \\
+ENFORCE & \code{ENFORCE '<rule>' [IN '<scope>']} \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\subsection{Parseur (\code{src/query/parser.py})}
+
+Transforme la chaîne brute en nœuds AST typés via le \code{\_QueryTransformer} (696 lignes).
+
+Types de nœuds AST :
+\begin{itemize}
+    \item \code{Condition}, \code{AndExpr}, \code{OrExpr}, \code{NotExpr}
+    \item \code{GetQuery}, \code{SearchQuery}, \code{GlobQuery}, \code{MetadataQuery}
+    \item \code{ImpactQuery}, \code{PathQuery}, \code{FlowQuery}, \code{StackQuery}
+    \item \code{AuditQuery}, \code{CheckLayersQuery}, \code{LayersOfQuery}
+    \item \code{FindImplementsQuery}, \code{FindDecoratedQuery}, \code{EnforceQuery}
+\end{itemize}
+
+Opérateurs supportés :
+\begin{lstlisting}
+==  !=  >=  <=  >  <       # Comparaison
+LIKE  NOT LIKE             # Glob pattern
+CONTAINS  NOT CONTAINS     # Sous-chaîne
+=~  !=~                    # Regex
+AND  OR  NOT  ( )          # Logique booléenne
+\end{lstlisting}
+
+\subsection{Compilateur (\code{src/query/compiler.py})}
+
+Le compilateur (1791 lignes) traduit l'AST en appels au client EngramDB :
+
+\begin{center}
+\begin{tabularx}{\textwidth}{lX}
+\toprule
+\textbf{Fonction} & \textbf{Rôle} \\
+\midrule
+\code{compile\_get} & Filtrage par type + expression booléenne, projection, DISTINCT, ORDER/LIMIT/OFFSET \\
+\code{compile\_search} & Conversion en GetQuery puis recherche regex/substring \\
+\code{compile\_glob} & Matching de chemins avec **, *, ?, \{a,b\}, [abc] \\
+\code{compile\_metadata} & Résolution de nœud + métadonnées complètes \\
+\code{compile\_impact} & Délégation à \code{analyse\_impact\_data} (BFS) \\
+\code{compile\_path} & BFS bidirectionnel multi-source \\
+\code{compile\_flow} & Délégation à \code{trace\_business\_flow} \\
+\code{compile\_stack} & Délégation à \code{trace\_frontend\_backend} \\
+\code{compile\_audit} & Scan d'isolation multi-tenant \\
+\code{compile\_check\_layers} & Détection de violations de couches architecturales \\
+\code{compile\_layers\_of} & Catégorisation des dépendances (stdlib/tiers/projet) \\
+\code{compile\_find\_implements} & Recherche d'implémentations d'interfaces \\
+\code{compile\_find\_decorated} & Recherche de décorateurs \\
+\code{compile\_enforce} & Moteur de règles architecturales \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\subsection{Exemples de Requêtes}
+
+\begin{lstlisting}
+-- Recherche regex avec flag case-insensitive
+SEARCH /def\s+auth_\w+/i IN functions
+
+-- Requête avec projection et tri
+GET name, lines_count functions ORDER BY lines_count DESC LIMIT 5
+
+-- Analyse d'impact
+IMPACT OF 'src/modules/sales/services.py:complete_sale' DIRECTION callers DEPTH 2
+
+-- Traçage de flux métier
+FLOW FOR 'src/modules/sales/services.py:create_sale' DEPTH 3
+
+-- Traçage full-stack
+STACK FOR '/sales'
+
+-- Vérification de couches architecturales
+CHECK LAYERS 'src/modules/sales' AGAINST 'src/modules/accounting'
+
+-- Règle d'architecture
+ENFORCE "sales MUST_NOT_IMPORT accounting" IN "src/modules/sales"
+\end{lstlisting}
+
+% ======================================================================
+\section{Couche Services}
+% ======================================================================
+
+\subsection{Graph Service (\code{src/services/graph\_service.py})}
+
+1302 lignes de logique métier. Fonctions principales :
+
+\begin{center}
+\begin{tabularx}{\textwidth}{lX}
+\toprule
+\textbf{Fonction} & \textbf{Rôle} \\
+\midrule
+\code{fuzzy\_search()} & Recherche floue avec enrichissement architectural \\
+\code{analyse\_impact\_data()} & BFS bidirectionnel avec détection Django/FastAPI/frontend \\
+\code{map\_impact()} & Wrapper YAML pour \code{analyse\_impact\_data()} \\
+\code{trace\_business\_flow()} & DFS récursif avec arbre ASCII, détection de modules \\
+\code{discover\_schemas()} & Découverte de schémas/models/entities \\
+\code{get\_project\_folders()} & Arbre hiérarchique + analyse de dépendances \\
+\code{trace\_frontend\_backend()} & Traçage full-stack React→Django \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\subsection{Editor Service (\code{src/services/editor\_service.py})}
+
+678 lignes dédiées à l'édition AST-aware de code :
+
+\begin{itemize}
+    \item \textbf{\code{edit\_node()}} — Pipeline complet : lookup → normalisation d'indentation → validation AST isolée → compilation fichier complet → détection dépendances orphelines → vérification signature → dry-run ou application avec backup + sync.
+    \item \textbf{\code{create\_node()}} — Validation type → garde dupliquer (vérification projet entier) → append fichier → validation syntaxique → dry-run ou application.
+    \item \textbf{\code{rename\_node()}} — Renommage AST-aware via tree-sitter (nœuds identifiants uniquement), propagation cross-fichier via blast radius.
+    \item \textbf{\code{add\_remove\_imports()}} — Gestion d'imports par ligne.
+\end{itemize}
+
+\textbf{Note de sécurité :} Toutes les éditions créent un fichier \code{.bak} avant modification.
+
+\subsection{Tool Wrappers (\code{src/services/tool\_wrappers.py})}
+
+Couche de validation Pydantic (424 lignes) :
+
+\begin{center}
+\begin{tabularx}{\textwidth}{lX}
+\toprule
+\textbf{Wrapper} & \textbf{Validation Pydantic} \\
+\midrule
+\code{search\_nodes\_wrapper()} & \code{SearchNodesInput} → \code{SearchResult} \\
+\code{analyze\_impact\_wrapper()} & \code{AnalyzeImpactInput} → \code{ImpactResult} \\
+\code{structured\_edit\_node\_wrapper()} & \code{StructuredEditNodeInput} → \code{EditResult} \\
+\code{structured\_create\_node\_wrapper()} & \code{StructuredCreateNodeInput} → \code{CreateResult} \\
+\code{structured\_rename\_node\_wrapper()} & \code{StructuredRenameNodeInput} → \code{RenameResult} \\
+\code{manage\_imports\_wrapper()} & \code{ManageImportsInput} → \code{ImportResult} \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+% ======================================================================
+\section{Couche Parser et Base de Données}
+% ======================================================================
+
+\subsection{Parseur AST (\code{src/database/parser/ast\_parser.py})}
+
+\code{UniversalCodeParser} est le moteur d'analyse structurelle basé sur tree-sitter (1060 lignes).
+
+\subsubsection{Support Multi-Langage}
+
+\begin{center}
+\begin{tabularx}{\textwidth}{lX}
+\toprule
+\textbf{Extension} & \textbf{Grammaire tree-sitter} \\
+\midrule
+\code{.py} & \code{tree-sitter-python} \\
+\code{.js}, \code{.jsx} & \code{tree-sitter-javascript} \\
+\code{.ts}, \code{.tsx} & \code{tree-sitter-typescript} \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\subsubsection{Extractions par parse\_file()}
+
+\begin{lstlisting}
+parse_file(path) → dict {
+    file_path,
+    imports, exports,
+    classes (with nested methods),
+    functions,
+    file_calls,
+    frameworks,
+    endpoints,
+    http_calls,
+    url_patterns,
+    file_body
+}
+\end{lstlisting}
+
+Pour chaque nœud (classe/fonction), le parseur extrait :
+\begin{itemize}
+    \item Nom, lignes début/fin, signature, docstring, body
+    \item \code{is\_async}, \code{is\_generator}, \code{param\_count}, \code{is\_exported}
+    \item \code{decorators}, \code{base\_classes}, \code{inherits}
+    \item Appels (résolution de noms qualifiés via \code{\_qualified\_name()})
+    \item Retours (\code{return\_statement})
+    \item Décorateurs : extraction regex \verb|@decorator\_name|
+\end{itemize}
+
+Détections spécialisées :
+\begin{itemize}
+    \item \textbf{Endpoints API} : Django (\code{@api\_view}), Flask (\code{@app.route}), FastAPI (\code{@app.get})
+    \item \textbf{Appels HTTP} : \code{fetch()}, \code{axios.get()}, \code{axios(\{...\})}
+    \item \textbf{URL patterns} : \code{urlpatterns = [path(..., view, ...)]}
+    \item \textbf{Frameworks} : django, fastapi, flask, react, vue, axios
+\end{itemize}
+
+\subsection{EngramClient (\code{src/database/graph\_client.py})}
+
+Pont Python vers le moteur Rust (574 lignes) :
+
+\begin{lstlisting}
+class EngramClient:
+    def __init__(self, workspace_path):
+        self.engine = engramdb.PyMetadataEngine(workspace_path)
+
+    def add_node(self, node_id, node_type, name, ...):
+        self.engine.add_node(node_id=node_id, ...)
+        # _extra_meta stocké en Python pour données riches
+
+    def build(self):
+        self.engine.build()
+        # Compilation CSR + snapshot binaire
+\end{lstlisting}
+
+Post-traitements (passés après indexation complète) :
+\begin{enumerate}
+    \item \code{resolve\_url\_patterns()} — Crée les arêtes Route→View
+    \item \code{resolve\_api\_calls()} — Matching frontend HTTP→backend (4 phases)
+    \item \code{resolve\_django\_relations()} — Arêtes inverses ORM
+\end{enumerate}
+
+\subsection{Thread Safety Client (\code{src/database/thread\_safe\_client.py})}
+
+Wrapper de pure pass-through (154 lignes). La sécurité thread est gérée entièrement côté Rust via \code{Arc<RwLock>}, donc ce module existe uniquement pour la rétrocompatibilité.
+
+\subsection{Factory Singleton (\code{src/database/\_\_init\_\_.py})}
+
+\begin{minted}{python}
+_db_instances = {}
+
+def get_graph_db(workspace_path=None) -> ThreadSafeGraphDB:
+    norm_path = os.path.abspath(workspace_path)
+    if norm_path not in _db_instances:
+        _db_instances[norm_path] = ThreadSafeGraphDB(workspace_path=norm_path)
+    return _db_instances[norm_path]
+\end{minted}
+
+Singleton global : une instance par chemin de workspace normalisé.
+
+% ======================================================================
+\section{File Watcher et Synchronisation}
+% ======================================================================
+
+\subsection{GraphSyncHandler (\code{src/watcher/sync\_handler.py})}
+
+Implémente \code{watchdog.events.FileSystemEventHandler} (505 lignes).
+
+\subsection{Mécanisme de Debounce}
+
+\begin{minted}{python}
+_debounce_timers = {}    # dict thread-safe via _debounce_lock
+
+def _enqueue_debounced_event(action, path):
+    # Annule le timer existant pour ce fichier
+    # Crée un nouveau threading.Timer(0.5, _fire_event, [action, path])
+    # Quand le timer expire → _sync_queue.put((action, path))
+\end{minted}
+
+Seuil : \textbf{500 ms}.
+
+\subsection{Mise à jour d'un Fichier}
+
+\code{update\_file\_in\_graph()} — flux complet (lignes 114-382) :
+
+\begin{enumerate}
+    \item \code{invalidate\_file()} côté Rust → suppression O(k)
+    \item Création des nœuds Dossier (récursif)
+    \item Création du nœud Fichier
+    \item Création des nœuds Route
+    \item Création des nœuds Classe + Méthodes
+    \item Création des nœuds Fonctions
+    \item Connexion des imports
+    \item Résolution des appels (Rust name index O(1))
+    \item Résolution des relations Django ORM
+    \item \code{rebuild()} (sauf si \code{skip\_rebuild=True})
+\end{enumerate}
+
+\subsection{Dossiers exclus}
+
+\begin{verbatim}
+node_modules, venv, .venv, target, dist, build, out,
+dist-electron, __pycache__, migrations, alembic,
+test, tests, __test__, spec, coverage,
+.git, .idea, .vscode, .next, .nuxt, esm, cjs
+\end{verbatim}
+
+Extensible via variable d'environnement \code{CORDYCEPS\_EXCLUDE}.
+
+% ======================================================================
+\section{Schémas et Modèles de Données}
+% ======================================================================
+
+\subsection{Convention d'ID de Nœuds}
+
+\begin{center}
+\begin{tabularx}{\textwidth}{lX}
+\toprule
+\textbf{Type} & \textbf{Format} \\
+\midrule
+Fonction & \code{rel\_file\_path:FunctionName} \\
+Méthode & \code{rel\_file\_path:ClassName.method\_name} \\
+Fichier & \code{rel\_file\_path} \\
+Dossier & \code{relative/folder/path} \\
+Route & \code{rel\_file\_path:/url/path} \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\subsection{Modèles Pydantic d'Entrée (\code{src/schemas/tool\_schemas.py})}
+
+13 modèles d'entrée avec validation :
+
+\begin{center}
+\begin{tabularx}{\textwidth}{lX}
+\toprule
+\textbf{Modèle} & \textbf{Champs clés} \\
+\midrule
+\code{SearchNodesInput} & keyword, type\_filter (function/class/file/folder), max\_results (1-500) \\
+\code{AnalyzeImpactInput} & node\_id, direction (callers/callees), depth \\
+\code{GetProjectStructureInput} & (aucun paramètre) \\
+\code{GetFolderSkeletonInput} & folder\_path (protection path traversal) \\
+\code{GetFileSkeletonInput} & file\_path \\
+\code{StructuredEditNodeInput} & node\_id, new\_code, dry\_run (default: true) \\
+\code{StructuredCreateNodeInput} & file\_path, node\_type, node\_name, code, dry\_run, force \\
+\code{StructuredRenameNodeInput} & node\_id, new\_name, dry\_run \\
+\code{ManageImportsInput} & file\_path, import\_statement, action (add/remove), dry\_run \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\subsection{Modèles Pydantic de Sortie}
+
+11 modèles de sortie dont :
+
+\begin{itemize}
+    \item \code{SearchResult} — liste de résultats
+    \item \code{ImpactResult} — callers/importers/model\_relations + url\_patterns + templates
+    \item \code{FileSkeletonResult} — classes imbriquées avec méthodes
+    \item \code{EditResult} — diff + warnings
+    \item \code{NodeReadResult} — code source + lignes
+    \item \code{ErrorResponse} — message d'erreur avec suggestions
+\end{itemize}
+
+% ======================================================================
+\section{Analyse des Performances}
+% ======================================================================
+
+\subsection{Opérations Rust}
+
+\begin{center}
+\begin{tabularx}{\textwidth}{lXl}
+\toprule
+\textbf{Opération} & \textbf{Complexité} & \textbf{Détails} \\
+\midrule
+\code{add\_node} & O(1) & 5 insertions HashMap \\
+\code{add\_edge} & O(1) & 2 lookups + 2 push \\
+\code{resolve\_calls} & O(n) & Résolution par nom \\
+\code{invalidate\_file} & O(k) & k = nœuds dans le fichier \\
+\code{build} (CSR) & O(V+E) & Compilation en tableaux plats \\
+\code{callers} / \code{callees} & O(k) & k = nombre de voisins \\
+\code{blast\_radius} / \code{recursive\_callees} & O(V+E) & BFS complet \\
+\code{search} & O(N) & Scan linéaire \\
+\code{get\_node} & O(1) & HashMap lookup \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\subsection{Gains de Performance du Passage en Rust}
+
+\begin{center}
+\begin{tabularx}{\textwidth}{lXXX}
+\toprule
+\textbf{Opération} & \textbf{Rust (bincode)} & \textbf{Python (JSON)} & \textbf{Gain} \\
+\midrule
+Sérialisation 50k nœuds & 10 ms & 5000 ms & ×500 \\
+Désérialisation 50k nœuds & 15 ms & 3000 ms & ×200 \\
+Taille snapshot 50k nœuds & 5 MB & 30 MB & ×6 \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+% ======================================================================
+\section{Modèle de Sécurité Thread}
+% ======================================================================
+
+\subsection{Architecture de Verrouillage}
+
+\begin{center}
+\begin{tikzpicture}[node distance=1.5cm]
+
+\tikzstyle{thread}=[rectangle, draw, minimum width=2.5cm, minimum height=0.7cm]
+\tikzstyle{lock}=[rectangle, draw, minimum width=2cm, minimum height=0.7cm, fill=red!20]
+
+\node[thread] (wt1) {Watchdog T1};
+\node[thread, below=of wt1] (wt2) {Watchdog T2};
+\node[lock, right=2cm of wt1] (timer) {Debounce 0.5s};
+\node[lock, right=2cm of wt2] (queue) {\code{\_sync\_queue}};
+
+\node[thread, below=2cm of queue] (main) {\textbf{Main Thread}};
+\node[lock, right=2cm of main] (rwlock) {\code{Arc<RwLock>}};
+
+\draw[->] (wt1) -- (timer);
+\draw[->] (wt2) -- (timer);
+\draw[->] (timer) -- (queue);
+\draw[->] (queue) -- (main);
+\draw[->] (main) -- (rwlock);
+
+\node[right=2cm of rwlock, align=left] {
+\textbf{Reads}: concurrent \\\small(search, blast\_radius, metadata) \\
+\textbf{Writes}: exclusif \\\small(add\_node, build, invalidate\_file)
+};
+
+\end{tikzpicture}
+\end{center}
+
+\subsection{Règles Essentielles}
+
+\begin{enumerate}
+    \item Les événements watchdog sont mis en file d'attente (jamais de calls Rust depuis les threads watchdog).
+    \item Le thread principal vide la file (\code{\_drain\_sync\_queue()}) avant chaque handler MCP.
+    \item Côté Rust : \code{read()} concurrent, \code{write()} exclusif.
+    \item Pas de \code{py.allow\_threads()} — les opérations sont sub-milliseconde.
+\end{enumerate}
+
+% ======================================================================
+\section{Tests et CI}
+% ======================================================================
+
+\subsection{Configuration des Tests}
+
+\begin{lstlisting}
+# Fichier conftest.py
+@pytest.fixture
+def isolated_temp_dir():
+    tmpdir = tempfile.mkdtemp(prefix="test_graph_code_")
+    yield tmpdir
+    shutil.rmtree(tmpdir, ignore_errors=True)
+
+@pytest.fixture
+def python_test_file(isolated_temp_dir):
+    test_file = os.path.join(isolated_temp_dir, "test_module.py")
+    with open(test_file, 'w') as f:
+        f.write("""def simple_function(): ... """)
+    return test_file
+
+# Marqueurs personnalisés
+pytest.-markers: unit, integration, slow, thread_safety
+\end{lstlisting}
+
+\subsection{Couverture}
+
+\begin{center}
+\begin{tabularx}{\textwidth}{lXr}
+\toprule
+\textbf{Langage} & \textbf{Type} & \textbf{Nombre} \\
+\midrule
+Python & Tests unitaires (parser, YAML) & 90 \\
+Rust & Tests unitaires (CSR, metadata, persistence) & 11 \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\subsection{Commandes}
+
+\begin{lstlisting}
+uv run python -m pytest                    # Tous les tests (90+)
+uv run python -m pytest -m unit            # Parser + YAML
+uv run python -m pytest -m integration     # Graphe + editor
+uv run python -m pytest -xvs test_ast_parser.py  # Boucle rapide
+\end{lstlisting}
+
+\subsection{CI (engram\_core)}
+
+Le pipeline CI est déclenché sur les tags \code{v*} via GitHub Actions (\code{engram\_core/.github/workflows/build.yml}). Produit des wheels pré-compilées pour Python 3.11-3.13 sur Linux/macOS/Windows.
+
+% ======================================================================
+\section{Diagramme de Flux Complet}
+% ======================================================================
+
+\subsection{Flux d'Exécution d'une Requête}
+
+\begin{lstlisting}[basicstyle=\ttfamily\scriptsize]
+query_dsl("GET functions WHERE name LIKE 'get_*' LIMIT 10")
+    │
+    ▼
+main.py:query_dsl(raw, expand_body)
+    │
+    ├── _drain_sync_queue()
+    │     queue.Queue           ← événements watchdog debouncés
+    │     ├── update_file_in_graph()
+    │     │     ├── invalidate_file()        [Rust: O(k) write lock]
+    │     │     ├── parser.parse_file()      [tree-sitter AST]
+    │     │     ├── add_node() × N          [Rust: O(1) write lock]
+    │     │     ├── resolve_and_connect_calls()  [Rust name index]
+    │     │     └── rebuild()              [Rust: CSR compile + snapshot]
+    │     ├── resolve_api_calls()           [Python: frontend→backend]
+    │     └── rebuild()                     [Rust: CSR + snapshot async]
+    │
+    ├── get_graph_db()
+    │     └── _db_instances[norm_path]      [Singleton factory]
+    │
+    ├── src/query/__init__.py:query()
+    │     ├── parse_query(raw)              [Lark LALR]
+    │     │     └── grammar.lark + _QueryTransformer → GetQuery
+    │     │
+    │     ├── compile_get(client, parsed)   [compiler.py: 1791 lignes]
+    │     │     ├── _collect_results()      [filtre type + expression booléenne]
+    │     │     │     ├── _evaluate_bool_expr()  [And/Or/Not/Condition]
+    │     │     │     └── _match_value()        [opérateurs: ==, LIKE, CONTAINS, =~]
+    │     │     ├── sort + limit + offset
+    │     │     └── _enrich_with_graph()    [WITH callers/callees]
+    │     │
+    │     └── _truncate_bodies_in_result()
+    │           [body → body_preview (150 char)]
+    │
+    └── to_yaml(result)
+          └── yaml.dump(sort_keys=False)
+\end{lstlisting}
+
+\subsection{Flux du Scan Initial}
+
+\begin{lstlisting}[basicstyle=\ttfamily\scriptsize]
+main.py:__main__
+    │
+    ├── 1. get_graph_db(WORKSPACE_PATH)
+    │     → engramdb.PyMetadataEngine(WORKSPACE_PATH)
+    │       ├── load_snapshot()            [restauration si snapshot existe]
+    │       └── ou engine vide
+    │
+    ├── 2. os.walk() → source_files
+    │     Exclus: node_modules, venv, __pycache__, .git, ...
+    │
+    ├── 3. ThreadPoolExecutor(max_workers=N)
+    │     └── parse_one(path) = parser.parse_file(path)
+    │           [tree-sitter CST → classes, functions, calls, imports, ...]
+    │
+    ├── 4. for path, data in results:         [Single-threaded]
+    │     └── update_file_in_graph(path, pre_parsed_data=data)
+    │           ├── invalidate_file(rel_path)
+    │           ├── Registre nœuds Dossier/Fichier/Route/Classe/Méthode/Fonction
+    │           ├── Connexion imports
+    │           ├── resolve_and_connect_calls()
+    │           └── Résolution Django ORM
+    │
+    ├── 5. Post-processing
+    │     ├── repopulate_edges()
+    │     ├── resolve_django_relations()
+    │     ├── resolve_url_patterns()
+    │     ├── resolve_api_calls()
+    │     ├── clean_stale_files()
+    │     └── build()                    [CSR compile + snapshot async]
+    │
+    ├── 6. PollingObserver.start()
+    │
+    └── 7. mcp.run(transport="stdio")
+\end{lstlisting}
+
+% ======================================================================
+\section{Conclusion}
+% ======================================================================
+
+Cordyceps Search constitue une architecture complète et performante pour l'analyse sémantique de code source. Les points forts majeurs sont :
+
+\begin{itemize}
+    \item \textbf{Moteur Rust haute performance} : CSR graph pour BFS microsecondes, MetadataEngine pour lookups O(1), snapshots binaires ×500 plus rapides que JSON.
+    \item \textbf{DSL unifié puissant} : 14 types de requêtes (GET, SEARCH, GLOB, IMPACT, FLOW, STACK, ENFORCE, etc.) avec grammaire Lark LALR et expressions booléennes complexes.
+    \item \textbf{Analyse multi-langage} : tree-sitter pour Python, JavaScript, TypeScript, JSX, TSX.
+    \item \textbf{Traçage cross-stack} : matching frontend HTTP → backend API en 4 phases.
+    \item \textbf{Refactoring AST-aware} : renommage, création, édition avec backups et validation syntaxique.
+    \item \textbf{Synchronisation temps réel} : file watcher watchdog avec debounce 500ms, queue thread-safe.
+    \item \textbf{Sécurité multi-tenant} : audit d'isolation tenant avec détection de paramètres \code{shop}.
+    \item \textbf{Règles architecturales} : ENFORCE permet de définir et vérifier des contraintes architecturales (layering, dépendances circulaires, décorateurs obligatoires).
+\end{itemize}
+
+\end{document}

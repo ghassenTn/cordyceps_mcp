@@ -1,0 +1,202 @@
+?start: query
+
+query: stats_query | get_query | search_query | glob_query | metadata_query | impact_query | path_query | flow_query | stack_query | audit_query | check_layers_query | layers_of_query | find_implements_query | find_decorated_query | enforce_query
+
+// ── GLOB query ──
+glob_query: GLOB_KW (QSTRING | IDENTIFIER) (WHERE_KW bool_expr)? get_clause*
+
+// ── SEARCH query ──
+search_query: SEARCH_KW BODIES_KW? REGEX_KW? search_pattern (OR_KW search_pattern)* (IN_KW (node_type | STAR))? (WHERE_KW bool_expr)? get_clause*
+search_pattern: REGEX_PATTERN | QSTRING
+
+// ── GET query ──
+get_query: GET_KW DISTINCT_KW projection FROM_KW node_type (WHERE_KW bool_expr)? get_clause*
+         | GET_KW DISTINCT_KW projection? node_type (WHERE_KW bool_expr)? get_clause*
+         | GET_KW projection FROM_KW node_type (WHERE_KW bool_expr)? get_clause*
+         | GET_KW FROM_KW node_type (WHERE_KW bool_expr)? get_clause*
+         | GET_KW projection? node_type (WHERE_KW bool_expr)? get_clause*
+         | GET_KW node_type projection (WHERE_KW bool_expr)? get_clause*   // type-first agg: GET functions SUM(lines)
+         | GET_KW projection (WHERE_KW bool_expr)? get_clause*          // projection-only (agg, etc.)
+
+projection: projection_item (COMMA projection_item)* -> proj_items
+          | COUNT_KW -> proj_count      // bare COUNT (backward compat)
+          | STAR -> proj_all
+
+projection_item: agg_func "(" (STAR | field_name) ")" -> proj_agg
+               | field_name -> proj_field
+
+projection_fields: field_name (COMMA field_name)*
+field_name: IDENTIFIER | FILE_PATH_KW
+
+agg_func: SUM_KW | COUNT_KW | AVG_KW | MIN_KW | MAX_KW
+
+?bool_expr: or_expr
+?or_expr: and_expr (OR_KW and_expr)*
+?and_expr: not_expr (AND_KW not_expr)*
+?not_expr: NOT_KW not_expr -> not_expr
+         | primary_expr
+
+?primary_expr: "(" bool_expr ")"
+             | condition
+
+?get_clause: with_clause | limit_clause | offset_clause | range_clause | order_clause | depth_clause | group_by_clause
+with_clause: WITH_KW graph_op
+limit_clause: LIMIT_KW (INT (COMMA INT)? | ALL_KW | STAR)
+offset_clause: OFFSET_KW INT
+range_clause: RANGE_KW INT (COLON | COMMA | RANGE_SEP) INT
+order_clause: ORDER_KW BY_KW field_name (ASC_KW | DESC_KW)?
+group_by_clause: GROUP_KW BY_KW group_by_field (COMMA group_by_field)*
+group_by_field: FILE_PATH_KW | TYPE | IDENTIFIER
+depth_clause: DEPTH_KW INT
+
+node_type: TYPE | ALL_KW
+
+condition: field operator value -> field_condition
+         | literal_condition -> cond_literal
+literal_condition: (INT | FLOAT | BOOLEAN) OP_EQ (INT | FLOAT | BOOLEAN) -> lit_cond
+                 | (INT | FLOAT | BOOLEAN) OP_NE (INT | FLOAT | BOOLEAN) -> lit_cond
+                 | BOOLEAN -> lit_bool
+field: IDENTIFIER
+operator: OP_GTE | OP_LTE | OP_GT | OP_LT | OP_EQ | OP_NE | OP_LIKE | OP_CONTAINS | OP_STARTSWITH | OP_ENDSWITH | OP_REGEX | OP_NOT_REGEX | OP_NOT_LIKE | OP_NOT_CONTAINS | OP_NOT_STARTSWITH | OP_NOT_ENDSWITH | OP_NOT_IN
+value: QSTRING | INT | FLOAT | BOOLEAN | "[" list_value "]"
+list_value: QSTRING ("," QSTRING)*
+
+graph_op: CALLERS_KW | CALLEES_KW | TREE_KW
+
+// ── METADATA query ──
+metadata_query: METADATA_KW FOR_KW QSTRING
+
+// ── IMPACT query ──
+impact_query: IMPACT_KW OF_KW QSTRING (DIRECTION_KW direction)? (DEPTH_KW INT)? (MODE_KW impact_mode)?
+impact_mode: COUNT_KW | SUMMARY_KW | DETAILED_KW
+direction: CALLERS_KW | CALLEES_KW
+
+// ── PATH query ──
+path_query: PATH_KW FROM_KW QSTRING TO_KW QSTRING
+
+// ── FLOW query ──
+flow_query: FLOW_KW (FOR_KW | OF_KW | FROM_KW)? QSTRING (THROUGH_KW IDENTIFIER+)? (DEPTH_KW INT)?
+          | FLOW_KW THROUGH_KW QSTRING (DEPTH_KW INT)?
+
+// ── STACK query ──
+stack_query: STACK_KW (FOR_KW | OF_KW)? QSTRING
+
+// ── AUDIT query ──
+audit_query: AUDIT_KW (TENANT_KW | ISOLATION_KW)? (FOR_KW | OF_KW)? (QSTRING | IDENTIFIER)?
+
+// ── CHECK LAYERS query ──
+check_layers_query: CHECK_KW LAYERS_KW QSTRING AGAINST_KW QSTRING
+
+// ── LAYERS OF query ──
+layers_of_query: LAYERS_KW OF_KW QSTRING
+
+// ── FIND IMPLEMENTS query ──
+find_implements_query: FIND_KW IMPLEMENTS_KW QSTRING (IN_KW node_type)?
+
+// ── FIND DECORATED WITH query ──
+find_decorated_query: FIND_KW DECORATED_KW WITH_KW QSTRING (IN_KW node_type)? (WHERE_KW bool_expr)? get_clause*
+
+// ── ENFORCE query ──
+enforce_query: ENFORCE_KW QSTRING (IN_KW QSTRING)?
+
+// ── STATS query ──
+stats_query: STATS_KW (FOR_KW | OF_KW)? QSTRING
+
+// ── Terminals ──
+// Keywords
+GET_KW: "GET"i
+DISTINCT_KW: "DISTINCT"i
+SEARCH_KW: "SEARCH"i
+GLOB_KW: "GLOB"i
+IN_KW: "IN"i
+WHERE_KW: "WHERE"i
+AND_KW: "AND"i
+OR_KW: "OR"i
+NOT_KW: "NOT"i
+WITH_KW: "WITH"i
+LIMIT_KW: "LIMIT"i
+OFFSET_KW: "OFFSET"i
+RANGE_KW: "RANGE"i
+ORDER_KW: "ORDER"i
+BY_KW: "BY"i
+GROUP_KW: "GROUP"i
+ASC_KW: "ASC"i
+DESC_KW: "DESC"i
+COUNT_KW: "COUNT"i
+SUMMARY_KW: "SUMMARY"i
+DETAILED_KW: "DETAILED"i
+MODE_KW: "MODE"i
+SUM_KW: "SUM"i
+AVG_KW: "AVG"i
+MIN_KW: "MIN"i
+MAX_KW: "MAX"i
+COLON: ":"
+COMMA: ","
+RANGE_SEP: ".."
+DEPTH_KW: "DEPTH"i
+ALL_KW.2: "ALL"i
+METADATA_KW: "METADATA"i
+FOR_KW: "FOR"i
+IMPACT_KW: "IMPACT"i
+OF_KW: "OF"i
+DIRECTION_KW: "DIRECTION"i
+CALLERS_KW: "callers"i
+CALLEES_KW: "callees"i
+TREE_KW: "tree"i
+STAR: "*"
+PATH_KW: "PATH"i
+FROM_KW: "FROM"i
+TO_KW: "TO"i
+FLOW_KW: "FLOW"i
+THROUGH_KW: "THROUGH"i
+STACK_KW: "STACK"i
+AUDIT_KW: "AUDIT"i
+TENANT_KW: "TENANT"i
+ISOLATION_KW: "ISOLATION"i
+CHECK_KW: "CHECK"i
+LAYERS_KW: "LAYERS"i
+AGAINST_KW: "AGAINST"i
+FIND_KW: "FIND"i
+IMPLEMENTS_KW: "IMPLEMENTS"i
+DECORATED_KW: "DECORATED"i
+ENFORCE_KW: "ENFORCE"i
+STATS_KW: "STATS"i
+REGEX_KW: "REGEX"i
+BODIES_KW: "BODIES"i
+
+// Node types
+TYPE.2: /(?:function|file|folder|middleware|route|module|package|declaration)s?|class(?:es)?/i
+
+// Identifiers
+IDENTIFIER.1: /[a-zA-Z_][a-zA-Z0-9_\.]*/
+FILE_PATH_KW.3: "file_path"i
+
+// Operators
+OP_GTE: ">="
+OP_LTE: "<="
+OP_GT: ">"
+OP_LT: "<"
+OP_EQ: "==" | "="
+OP_NE: "!="
+OP_LIKE: "LIKE"i
+OP_CONTAINS: "CONTAINS"i
+OP_STARTSWITH: "STARTSWITH"i
+OP_ENDSWITH: "ENDSWITH"i
+OP_REGEX: "=~" | /matches/i
+OP_NOT_REGEX: "!~" | "!=~" | /not\s+matches/i
+OP_NOT_LIKE: /not\s+like/i
+OP_NOT_CONTAINS: /not\s+contains/i
+OP_NOT_STARTSWITH: /not\s+startswith/i
+OP_NOT_ENDSWITH: /not\s+endswith/i
+OP_NOT_IN: /not\s+in/i
+
+// Strings, Numbers & Booleans
+REGEX_PATTERN.2: /\/(?:\\\/|[^\/\n])+\/[a-zA-Z]*/
+QSTRING: /"[^"]*"/ | /'[^']*'/
+BOOLEAN.2: "true"i | "false"i
+
+%import common.INT
+%import common.FLOAT
+%import common.WS
+%ignore WS
+

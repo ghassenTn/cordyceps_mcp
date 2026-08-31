@@ -1,0 +1,159 @@
+language: javascript
+display_name: JavaScript
+extensions:
+  - .js
+
+grammar:
+  module: tree_sitter_javascript
+  language_function: language
+
+# AST structural node types — how tree-sitter-javascript represents each construct.
+# Mirrors TypeScript (.ts) minus type-specific nodes (no type_identifier, no
+# type annotations, class fields are `field_definition`).
+node_types:
+  program_root: program
+  # JS has no wrapper node that groups a definition with its decorators —
+  # decorators are preceding siblings (see _extract_decorators). Keep the
+  # default name so no Python-style wrapping is assumed.
+  decorated_definition: decorated_definition
+  class_nodes: [class_declaration]
+  function_nodes: [function_declaration, generator_function_declaration]
+  # `const x = () => {}` — the arrow lives inside a lexical/variable declaration.
+  arrow_nodes: [lexical_declaration, variable_declaration]
+  method_nodes: [method_definition, field_definition]
+  class_body: class_body
+  namespace_nodes: [internal_module, module]
+  body_nodes: [statement_block, class_body, block]
+  name_identifiers: [identifier, property_identifier]
+  call_nodes: [call_expression]
+  string_nodes: [string, template_string]
+  decorator_nodes: [decorator]
+  identifier_nodes: [identifier, property_identifier]
+  member_nodes: [member_expression]
+  argument_list_nodes: [arguments]
+  parameters_nodes: [formal_parameters]
+  param_ignore_types: ["(", ")", ",", ":", ";", "comment"]
+  comment_nodes: [comment]
+  statement_nodes: [expression_statement]
+  assignment_nodes: [lexical_declaration, variable_declaration, assignment_expression]
+  list_nodes: [array]
+  lambda_nodes: [arrow_function]
+  # Async is signalled by the `async` keyword node, not a dedicated wrapper.
+  async_function_nodes: []
+  async_keywords: [async]
+  generator_function_nodes: [generator_function_declaration]
+  generator_keywords: [yield, yield_expression]
+  # Node types we should NOT descend into when looking for nested constructs.
+  prune_walk_nodes:
+    - function_declaration
+    - generator_function_declaration
+    - method_definition
+    - field_definition
+    - arrow_function
+    - class_declaration
+  export_statement_nodes: [export_statement]
+  export_default_statement_nodes: [export_default_statement]
+  export_prefix_skips: [export, default, async, abstract]
+  base_class_nodes: [class_heritage]
+  base_class_extends_keyword: extends
+  base_class_ignores: [object]
+  return_statement_nodes: [return_statement]
+  require_nodes: [lexical_declaration, variable_declaration]
+  variable_declarator_nodes: [variable_declarator]
+  arrow_function_nodes: [arrow_function]
+  # Component wrappers whose first function argument is the real component
+  arrow_wrapper_functions: [forwardRef, memo, observer]
+  function_expression_nodes: [function_expression]
+  class_declaration_nodes: [class_declaration]
+  function_declaration_nodes: [function_declaration]
+  import_statement_nodes: [import_statement]
+  import_from_statement_nodes: [import_from_statement]
+  dotted_name_nodes: []
+  export_clause_nodes: [export_clause]
+  export_specifier_nodes: [export_specifier]
+  default_keyword_nodes: [default]
+  keyword_argument_nodes: [keyword_argument]
+  jsx_nodes: [jsx_element, jsx_self_closing_element, jsx_opening_element, jsx_attribute, jsx_expression]
+  jsx_identifier_nodes: [identifier, property_identifier]
+  module_name_field: module_name
+
+# Per-pattern toggles for import extraction.
+imports:
+  enable_import_statement: true
+  enable_import_from: true
+  enable_require: true
+
+# Route / middleware / URL pattern extraction.
+routes:
+  route_methods:
+    - get
+    - post
+    - put
+    - delete
+    - patch
+    - head
+    - options
+    - route
+    - use
+    - mount
+  route_functions: [path, re_path]
+  http_methods: [GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS]
+  middleware_methods: [use, add_middleware]
+  middleware_decorator_prefixes: [middleware, before_request, after_request]
+  declarative_middleware_var: MIDDLEWARE
+  url_patterns_var: urlpatterns
+  include_function: include
+  # NestJS-style bare decorators (@Controller, @Get ...).
+  controller_decorators: [Controller]
+  method_decorators: [Get, Post, Put, Delete, Patch, Head, Options]
+  # React Router JSX routes.
+  jsx_route_tag: Route
+  jsx_browser_router_fn: createBrowserRouter
+
+# Feature flags — enable/disable whole extraction passes per language.
+features:
+  docstrings: false
+  exports: true
+  django_relations: false
+  url_patterns: false
+  file_based_routes: true
+  jsx_routes: false
+  trpc_routes: true
+  commonjs_imports: true
+  http_calls: true
+  framework_detection: true
+  test_framework_detection: true
+  generic_test_patterns: true
+  declarations: true
+
+# Framework detection rules: framework name → substring signals found in source.
+frameworks:
+  - name: express
+    signals: ["from 'express'", "from \"express\"", "require('express')", "require(\"express\")"]
+  - name: react
+    signals: ["from 'react'", "from \"react\"", "from 'react-dom'", "from \"react-dom\""]
+  - name: nextjs
+    signals: ["from 'next/", "from \"next/"]
+  - name: react-router
+    signals: ["react-router-dom", "react-router"]
+  - name: vue
+    signals: ["from 'vue'", "from \"vue\""]
+  - name: fastify
+    signals: ["from 'fastify'", "from \"fastify\""]
+  - name: axios
+    signals: ["from 'axios'", "from \"axios\"", "require('axios')", "require(\"axios\")"]
+  - name: prisma
+    signals: ["from '@prisma/client'", "from \"@prisma/client\""]
+
+# Test framework detection rules.
+test_frameworks:
+  - name: vitest
+    signals: ["'vitest'", '"vitest"']
+  - name: jest
+    signals: ["'jest'", '"jest"']
+  - name: bun:test
+    signals: ["'bun:test'", '"bun:test"']
+  - name: mocha
+    signals: ["'mocha'", '"mocha"']
+  - name: jasmine
+    signals: ["'jasmine'", '"jasmine"']

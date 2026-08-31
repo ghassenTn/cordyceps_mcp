@@ -1,0 +1,156 @@
+language: python
+display_name: Python
+extensions:
+  - .py
+
+grammar:
+  module: tree_sitter_python
+  language_function: language
+
+# AST structural node types — how tree-sitter-python represents each construct.
+node_types:
+  program_root: module
+  # Wrapper node that groups a definition with its decorators (None if the
+  # grammar has no such wrapper).
+  decorated_definition: decorated_definition
+  class_nodes: [class_definition]
+  function_nodes: [function_definition, async_function_definition]
+  arrow_nodes: []
+  method_nodes: [function_definition, async_function_definition]
+  class_body: block
+  body_nodes: [block, class_body, statement_block]
+  name_identifiers: [identifier]
+  call_nodes: [call]
+  string_nodes: [string]
+  decorator_nodes: [decorator]
+  identifier_nodes: [identifier]
+  member_nodes: [attribute]
+  argument_list_nodes: [argument_list]
+  parameters_nodes: [parameters, formal_parameters]
+  param_ignore_types: ["(", ")", ",", ":", ";", "comment"]
+  comment_nodes: [comment]
+  statement_nodes: [expression_statement]
+  assignment_nodes: [assignment]
+  list_nodes: [list]
+  lambda_nodes: [lambda]
+  async_function_nodes: [async_function_definition, async_function]
+  async_keywords: [async]
+  generator_function_nodes: [generator_function, generator_function_declaration]
+  generator_keywords: [yield, yield_statement, yield_expression]
+  # Node types we should NOT descend into when looking for nested constructs.
+  prune_walk_nodes:
+    - decorated_definition
+    - function_definition
+    - async_function_definition
+    - class_definition
+    - method_definition
+    - arrow_function
+    - generator_function
+    - lambda
+  export_statement_nodes: [export_statement]
+  export_default_statement_nodes: [export_default_statement]
+  export_prefix_skips: [export]
+  base_class_nodes: [argument_list, class_heritage]
+  base_class_extends_keyword: extends
+  base_class_ignores: [object]
+  return_statement_nodes: [return_statement]
+  require_nodes: [lexical_declaration, variable_declaration]
+  variable_declarator_nodes: [variable_declarator]
+  arrow_function_nodes: [arrow_function]
+  function_expression_nodes: [function_expression]
+  class_declaration_nodes: [class_declaration]
+  function_declaration_nodes: [function_declaration]
+  import_statement_nodes: [import_statement]
+  import_from_statement_nodes: [import_from_statement]
+  dotted_name_nodes: [dotted_name]
+  export_clause_nodes: [export_clause]
+  export_specifier_nodes: [export_specifier]
+  default_keyword_nodes: [default]
+  keyword_argument_nodes: [keyword_argument]
+  jsx_nodes: [jsx_self_closing_element, jsx_opening_element, jsx_attribute, jsx_expression]
+  jsx_identifier_nodes: [jsx_identifier]
+  module_name_field: module_name
+
+# Per-pattern toggles for import extraction.
+imports:
+  enable_import_statement: true
+  enable_import_from: true
+  enable_require: false
+
+# Route / middleware / URL pattern extraction.
+routes:
+  route_methods:
+    - get
+    - post
+    - put
+    - delete
+    - patch
+    - head
+    - options
+    - route
+    - add_route
+    - add_url_rule
+    - api_operation
+    - add_router
+    - include_router
+    - mount
+    - use
+    - register_blueprint
+  route_functions: [path, re_path]
+  http_methods: [GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS]
+  middleware_methods: [add_middleware]
+  middleware_decorator_prefixes: [middleware, before_request, after_request]
+  declarative_middleware_var: MIDDLEWARE
+  url_patterns_var: urlpatterns
+  include_function: include
+  # NestJS-style bare decorators (@Controller, @Get ...) — not used by Python.
+  controller_decorators: [Controller]
+  method_decorators: [Get, Post, Put, Delete, Patch, Head, Options]
+  # React Router file patterns — not used by Python.
+  jsx_route_tag: Route
+  jsx_browser_router_fn: createBrowserRouter
+
+# Feature flags — enable/disable whole extraction passes per language.
+features:
+  docstrings: true
+  exports: false
+  django_relations: true
+  url_patterns: true
+  file_based_routes: false
+  jsx_routes: false
+  trpc_routes: false
+  commonjs_imports: false
+  http_calls: false
+  framework_detection: true
+  test_framework_detection: false
+  generic_test_patterns: false
+
+# Framework detection rules: framework name → substring signals found in source.
+frameworks:
+  - name: django
+    signals: [from django, import django]
+  - name: fastapi
+    signals: [from fastapi, import fastapi]
+  - name: flask
+    signals: [from flask, import flask]
+  - name: django-rest-framework
+    signals: [from rest_framework]
+  - name: django-ninja
+    signals: [from ninja, import ninja, from ninja_extra, import ninja_extra, from ninja_jwt]
+  - name: pytest
+    signals: [import pytest, from pytest]
+  - name: unittest
+    signals: [import unittest, from unittest]
+
+# Test framework detection rules (keywords/imports) — currently JS/TS only.
+test_frameworks:
+  - name: vitest
+    signals: ["'vitest'", '"vitest"']
+  - name: jest
+    signals: ["'jest'", '"jest"']
+  - name: bun:test
+    signals: ["'bun:test'", '"bun:test"']
+  - name: mocha
+    signals: ["'mocha'", '"mocha"']
+  - name: jasmine
+    signals: ["'jasmine'", '"jasmine"']
