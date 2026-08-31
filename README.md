@@ -127,11 +127,10 @@ Executes a Cordyceps Query DSL string against the live CSR graph. All outputs ar
 | `PATH` | `PATH FROM "a.py:foo" TO "b.py:bar"` | Shortest dependency path |
 | `FLOW` | `FLOW FOR "src/api.py:create_sale" DEPTH 5` | Business-flow tree |
 | `STACK` | `STACK FOR "/api/sales"` | Frontend hook → backend handler trace |
-| `AUDIT` | `AUDIT FOR sales` | Tenant-isolation audit |
 | `STATS` | `STATS FOR "src/modules/sales"` | Module stats (LOC, counts) |
 | `CHECK LAYERS` | `CHECK LAYERS "domain" AGAINST "infra"` | Architecture layer violation check |
 
-All legacy search / impact / flow / full-stack / audit capabilities are available through `query_dsl` with the appropriate verb — see `query_dsl_help` for the complete grammar.
+All legacy search / impact / flow / full-stack capabilities are available through `query_dsl` with the appropriate verb — see `query_dsl_help` for the complete grammar.
 
 ---
 
