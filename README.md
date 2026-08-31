@@ -47,30 +47,41 @@ Excluded from indexing: `node_modules`, `venv`, `.venv`, `__pycache__`, `target`
 
 ---
 
-## 🛠️ Getting Started
+## Getting Started
 
 ### Prerequisites
 
 * Python `>= 3.11`
-* [uv](https://github.com/astral-sh/uv) (Fast Python Package Installer and Manager)
+* [uv](https://github.com/astral-sh/uv) (Fast Python Package Installer)
+* Rust toolchain (only for local `engramedb` development)
 
 ### Installation
 
-Clone the repository and install dependencies using `uv`:
-
 ```bash
-# Clone the repository
-git clone https://github.com/your-repo/cordyceps_search.git
-cd cordyceps_search
-
-# Install project dependencies
-uv sync
+git clone https://github.com/ghassenTn/cordyceps_mcp.git
+cd cordyceps_mcp
+uv sync --python 3.11
 ```
 
-For development of the Rust core crate (`engram_core`):
+This installs `engramedb` from PyPI as declared in `pyproject.toml`. No local engine checkout required for normal use.
+
+### Local Development (engine + MCP)
+
+For editable installs where MCP uses a sibling `engramedb` checkout:
+
 ```bash
-cd engram_core
-maturin develop
+git clone https://github.com/ghassenTn/cordyceps_mcp.git
+git clone https://github.com/ghassenTn/engramedb.git
+# layout: cordyceps_mcp/  ../engramedb/
+cd cordyceps_mcp
+uv sync --python 3.11  # uses [tool.uv.sources] path = "../engramedb"
+```
+
+Engine development:
+
+```bash
+cd ../engramedb
+maturin develop --release
 ```
 
 ---
