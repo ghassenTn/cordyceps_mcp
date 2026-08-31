@@ -3170,9 +3170,25 @@ def _count_test_calls_in_body(body: str) -> int:
 
 def compile_stats(client: Any, query: StatsQuery) -> dict:
     """Project / module stats — a one-shot onboarding summary."""
+    import os
+
     all_meta = client.get_all_metadata()
     root = query.path.strip()
-    root = root.lstrip("./").lstrip("/").rstrip("/")
+    workspace = getattr(client, "workspace_path", "")
+    if not workspace and hasattr(client, "_client"):
+        workspace = getattr(client._client, "workspace_path", "")
+
+    # Indexed file paths are workspace-relative. Accept an absolute workspace
+    # path too, which is what agents often have in their execution context.
+    if root and os.path.isabs(root) and workspace:
+        try:
+            relative = os.path.relpath(root, workspace)
+            if relative != os.pardir and not relative.startswith(os.pardir + os.sep):
+                root = relative
+        except ValueError:
+            pass
+
+    root = root.replace("\\", "/").lstrip("./").lstrip("/").rstrip("/")
     if root in ("", ".", "./"):
         root = ""
 
@@ -3190,7 +3206,7 @@ def compile_stats(client: Any, query: StatsQuery) -> dict:
     for node_id, meta in all_meta.items():
         meta = dict(meta) if hasattr(meta, "items") else meta
         fpath = meta.get("file_path", "")
-        if root and not fpath.startswith(root):
+        if root and fpath != root and not fpath.startswith(root + "/"):
             continue
 
         ntype = meta.get("type", "")

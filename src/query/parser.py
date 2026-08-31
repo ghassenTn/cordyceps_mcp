@@ -762,8 +762,6 @@ class _QueryTransformer(Transformer):
                 continue
             if isinstance(item, str) and item.startswith(("'", '"')):
                 path = item.strip("'\"")
-        if not path:
-            raise ValueError("STATS requires a target path")
         return StatsQuery(path=path)
 
     def node_type(self, items):

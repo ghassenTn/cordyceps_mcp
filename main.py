@@ -191,7 +191,7 @@ find_decorated_query: FIND_KW DECORATED_KW WITH_KW QSTRING (IN_KW node_type)? (W
 enforce_query: ENFORCE_KW QSTRING (IN_KW QSTRING)?
 
 // ── STATS query ──
-stats_query: STATS_KW (FOR_KW | OF_KW)? QSTRING
+stats_query: STATS_KW (FOR_KW | OF_KW)? QSTRING?
 
 // ── Terminals ──
 // Keywords

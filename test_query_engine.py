@@ -2063,6 +2063,33 @@ class TestP2UsabilityFixes:
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
+    def test_stats_defaults_to_workspace_and_accepts_absolute_paths(self):
+        """STATS is usable without a path and accepts the agent's absolute path."""
+        from src.query import query
+        from src.database.graph_client import EngramClient
+        import tempfile
+        import shutil
+        import os
+
+        tmpdir = tempfile.mkdtemp()
+        try:
+            client = EngramClient(tmpdir)
+            client.add_node("src/a.py", "File", "a.py", "src/a.py", lines={"start": 1, "end": 10})
+            client.add_node("src2/b.py", "File", "b.py", "src2/b.py", lines={"start": 1, "end": 20})
+            client.build()
+
+            root = query(client, "STATS")
+            assert root["meta"]["files"] == 2
+
+            relative = query(client, "STATS FOR 'src'")
+            assert relative["meta"]["files"] == 1
+
+            absolute = query(client, f'STATS FOR "{os.path.join(tmpdir, "src")}"')
+            assert absolute["meta"]["files"] == 1
+            assert absolute["meta"]["path"] == "src"
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
     def test_flow_reports_duplicates_traced(self):
         """FLOW output surfaces the dedup behavior instead of only a cosmetic marker."""
         from unittest import mock
