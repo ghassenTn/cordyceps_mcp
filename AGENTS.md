@@ -9,7 +9,6 @@ uv run python -m pytest -m unit          # 99 tests (test_ast_parser, test_langu
 uv run python -m pytest -m integration   # 22 tests (test_graph_service)
 uv run python -m pytest -xvs test_ast_parser.py  # Fast loop on parser tests
 cd ../engramedb && maturin develop       # Rebuild Rust engine after Rust changes
-uv run python cordyceps_gui.py           # PyQt6 "Query Studio" GUI (dev tool)
 uv run python stress_test.py             # Standalone concurrency stress test
 ```
 
