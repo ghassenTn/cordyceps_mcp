@@ -2,7 +2,7 @@
 name = "cordyceps-search"
 version = "0.1.0"
 description = "MCP server for code search and impact analysis (subset of Cordyceps Engine)"
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.14"
 dependencies = [
     "engramedb",
     "mcp[cli]>=1.27.0",
@@ -18,5 +18,8 @@ dependencies = [
 ]
 
 
-[tool.uv.sources]
-engramedb = { path = "../engramedb", editable = true }
+# For local editable engramedb (sibling ../engramedb checkout), use:
+#   uv sync --python 3.11 --with engramedb --refresh-package engramedb
+# or temporarily add:
+#   [tool.uv.sources]
+#   engramedb = { path = "../engramedb", editable = true }
