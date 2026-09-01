@@ -9,7 +9,7 @@ import logging
 import re
 from typing import Any
 
-from .parser import GetQuery, SearchQuery, GlobQuery, MetadataQuery, ImpactQuery, PathQuery, FlowQuery, StackQuery, AuditQuery, CheckLayersQuery, LayersOfQuery, FindImplementsQuery, FindDecoratedQuery, EnforceQuery, StatsQuery, Condition, UNLIMITED
+from .parser import GetQuery, SearchQuery, GlobQuery, MetadataQuery, ImpactQuery, PathQuery, FlowQuery, StackQuery, CheckLayersQuery, LayersOfQuery, FindImplementsQuery, FindDecoratedQuery, EnforceQuery, StatsQuery, Condition, UNLIMITED
 
 logger = logging.getLogger(__name__)
 
@@ -1934,52 +1934,6 @@ def compile_stack(client: Any, query: StackQuery) -> dict:
     except Exception:
         pass
     return {"meta": {"ok": True, "query_type": "STACK", "endpoint": query.api_endpoint}, "results": {"raw": res_yaml}}
-
-
-def compile_audit(client: Any, query: AuditQuery) -> dict:
-    """Compile an AuditQuery into tenant isolation security audit."""
-    all_meta = client.get_all_metadata()
-    module = query.module.lower()
-    audited = []
-    for nid, meta in all_meta.items():
-        meta_dict = dict(meta.items()) if hasattr(meta, "items") else meta
-        fpath = meta_dict.get("file_path", "").lower()
-        if module != "all" and module not in fpath:
-            continue
-        inherits = meta_dict.get("inherits", []) or meta_dict.get("base_classes", [])
-        sig = meta_dict.get("signature", "")
-        body = meta_dict.get("body", "")
-
-        status = "SECURE"
-        msg = "Proper tenant isolation confirmed"
-        if meta_dict.get("type") == "Class" and "TenantAwareModel" not in str(inherits) and "Model" in sig:
-            status = "RISK"
-            msg = "Model class does not inherit from TenantAwareModel"
-        elif meta_dict.get("type") == "Function" and "shop" not in sig and ("objects." in body or "filter(" in body):
-            status = "CRITICAL"
-            msg = "DB query function missing shop parameter"
-
-        if status != "SECURE" or module != "all":
-            audited.append({
-                "node_id": nid,
-                "name": meta_dict.get("name"),
-                "file_path": meta_dict.get("file_path"),
-                "status": status,
-                "message": msg
-            })
-
-    total = len(audited)
-    sliced = audited[:50]
-    return {
-        "meta": {
-            "ok": True,
-            "query_type": "AUDIT",
-            "module": query.module,
-            "count": len(sliced),
-            "total": total,
-        },
-        "results": sliced,
-    }
 
 
 STDLIB_MODULES = {

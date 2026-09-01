@@ -130,7 +130,7 @@ Executes a Cordyceps Query DSL string against the live CSR graph. All outputs ar
 | `STATS` | `STATS FOR "src/modules/sales"` | Module stats (LOC, counts) |
 | `CHECK LAYERS` | `CHECK LAYERS "domain" AGAINST "infra"` | Architecture layer violation check |
 
-All legacy search / impact / flow / full-stack capabilities are available through `query_dsl` with the appropriate verb — see `query_dsl_help` for the complete grammar.
+All legacy search / impact / flow / full-stack capabilities are available through `query_dsl` with the appropriate verb — see `query_dsl_help` for the complete command reference.
 
 ---
 ## IDE Integration (example kiro ide)

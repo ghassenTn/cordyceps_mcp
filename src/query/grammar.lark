@@ -1,6 +1,6 @@
 ?start: query
 
-query: stats_query | get_query | search_query | glob_query | metadata_query | impact_query | path_query | flow_query | stack_query | audit_query | check_layers_query | layers_of_query | find_implements_query | find_decorated_query | enforce_query
+query: stats_query | get_query | search_query | glob_query | metadata_query | impact_query | path_query | flow_query | stack_query | check_layers_query | layers_of_query | find_implements_query | find_decorated_query | enforce_query
 
 // ── GLOB query ──
 glob_query: GLOB_KW (QSTRING | IDENTIFIER) (WHERE_KW bool_expr)? get_clause*
@@ -81,9 +81,6 @@ flow_query: FLOW_KW (FOR_KW | OF_KW | FROM_KW)? QSTRING (THROUGH_KW IDENTIFIER+)
 // ── STACK query ──
 stack_query: STACK_KW (FOR_KW | OF_KW)? QSTRING
 
-// ── AUDIT query ──
-audit_query: AUDIT_KW (TENANT_KW | ISOLATION_KW)? (FOR_KW | OF_KW)? (QSTRING | IDENTIFIER)?
-
 // ── CHECK LAYERS query ──
 check_layers_query: CHECK_KW LAYERS_KW QSTRING AGAINST_KW QSTRING
 
@@ -150,9 +147,6 @@ TO_KW: "TO"i
 FLOW_KW: "FLOW"i
 THROUGH_KW: "THROUGH"i
 STACK_KW: "STACK"i
-AUDIT_KW: "AUDIT"i
-TENANT_KW: "TENANT"i
-ISOLATION_KW: "ISOLATION"i
 CHECK_KW: "CHECK"i
 LAYERS_KW: "LAYERS"i
 AGAINST_KW: "AGAINST"i

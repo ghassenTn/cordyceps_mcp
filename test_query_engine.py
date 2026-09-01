@@ -896,7 +896,7 @@ class TestCompileGet:
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
-    def test_query_flow_stack_audit_syntax(self):
+    def test_query_flow_stack_syntax_and_removed_audit_rejection(self):
         from src.query import query
         from src.database.graph_client import EngramClient
         import tempfile
@@ -916,9 +916,20 @@ class TestCompileGet:
             assert res_stack.get("query_type") == "STACK"
 
             res_audit = query(client, "AUDIT TENANT sales")
-            assert res_audit.get("meta", {}).get("query_type") == "AUDIT"
+            assert res_audit["ok"] is False
+            assert "Parse error" in res_audit["error"]
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_query_dsl_help_is_a_practical_reference(self):
+        import main
+
+        help_text = main.query_dsl_help()
+        assert "Cordyceps Query DSL Reference" in help_text
+        assert 'SEARCH "create_sale" IN functions' in help_text
+        assert 'PATH FROM "api.py:create_sale" TO "services.py:create_sale"' in help_text
+        assert "AUDIT" not in help_text
+        assert "?start:" not in help_text
 
     def test_general_project_architecture(self):
         from src.query import query

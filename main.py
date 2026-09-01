@@ -27,6 +27,145 @@ except Exception:
 
 logger = logging.getLogger(__name__)
 
+QUERY_DSL_HELP = """Cordyceps Query DSL Reference
+================================
+
+Use this single tool for all code graph discovery and analysis. Keywords are
+case-insensitive. Quote node IDs, paths, patterns, decorators, and rules with
+single or double quotes.
+
+Quick start
+-----------
+  STATS
+  SEARCH "create_sale" IN functions
+  GLOB "**/*.py"
+  METADATA FOR "api.py:create_sale"
+  IMPACT OF "services.py:create_sale" DIRECTION callers DEPTH 2 MODE summary
+  PATH FROM "api.py:create_sale" TO "services.py:create_sale"
+  FLOW FOR "api.py:create_sale" DEPTH 5
+  STACK FOR "/api/sales"
+
+Core discovery
+--------------
+  GET [projection] [FROM] <type> [WHERE <expression>] [clauses]
+    GET functions
+    GET name, file_path FROM classes WHERE file_path CONTAINS "domain"
+    GET COUNT(*) FROM functions
+    GET SUM(lines_count), AVG(param_count) FROM functions GROUP BY file_path
+    GET DISTINCT decorators FROM functions
+    GET functions WHERE is_async == true ORDER BY lines_count DESC LIMIT 20
+    GET functions WITH callees DEPTH 2 LIMIT 10
+
+  SEARCH [BODIES] [REGEX] <pattern> [OR <pattern> ...] [IN <type>] [clauses]
+    SEARCH "create_sale" IN functions
+    SEARCH /def\\s+test_\\w+/i IN functions
+    SEARCH BODIES "transaction.atomic" IN functions
+    SEARCH "login" OR "authenticate" IN functions LIMIT 20
+
+  GLOB <path-pattern> [WHERE <expression>] [clauses]
+    GLOB "**/*.py"
+    GLOB "src/modules/*/services.py"
+    GLOB "**/*.{py,ts,tsx}" LIMIT 100
+
+GLOB returns File and Folder nodes only. Use SEARCH or GET to find symbols in
+matching files.
+
+Graph analysis
+--------------
+  METADATA FOR <node-id>
+    METADATA FOR "src/api.py:create_sale"
+    Returns full node metadata, direct callers/callees, structural dependencies,
+    and unresolved external calls.
+
+  IMPACT OF <node-id> [DIRECTION callers|callees] [DEPTH n]
+         [MODE count|summary|detailed]
+    IMPACT OF "services.py:create_sale"
+    IMPACT OF "services.py:create_sale" DIRECTION callers DEPTH 2 MODE summary
+    IMPACT OF "services.py:create_sale" DIRECTION callees MODE count
+
+  PATH FROM <start-node-id> TO <end-node-id>
+    PATH FROM "api.py:create_sale" TO "services.py:create_sale"
+    Finds the shortest full dependency path. PATH includes structural edges;
+    callers/callees and IMPACT use executable edges only.
+
+  FLOW [FOR|OF|FROM] <node-id> [DEPTH n]
+    FLOW FOR "api.py:create_sale" DEPTH 5
+    FLOW THROUGH "/api/sales" DEPTH 5
+    FLOW THROUGH mode traces route, middleware, handler, and service pipeline.
+
+  STACK [FOR|OF] <endpoint-or-node-id>
+    STACK FOR "/api/sales"
+    STACK FOR "api.py:create_sale"
+    Traces frontend component/hook/API client to backend handler when links exist.
+
+Architecture and structure
+--------------------------
+  STATS [FOR|OF] [path]
+    STATS
+    STATS FOR "src/modules/sales"
+    STATS FOR "/absolute/path/to/workspace/src/modules/sales"
+    Bare STATS summarizes the indexed workspace. Absolute workspace paths are
+    accepted and normalized to indexed relative paths.
+
+  CHECK LAYERS <layer-path> AGAINST <forbidden-layer-path>
+    CHECK LAYERS "domain" AGAINST "infrastructure"
+    CHECK LAYERS "src/modules/sales" AGAINST "src/modules/comptabilite"
+
+  LAYERS OF <layer-path>
+    LAYERS OF "src/modules/sales"
+    Categorizes imports as stdlib, third_party, or project. Root (".") is not
+    a layer; an error includes a valid indexed-directory example.
+
+  FIND IMPLEMENTS <base-class-or-protocol> [IN classes]
+    FIND IMPLEMENTS "Repository"
+    FIND IMPLEMENTS "Protocol" IN classes
+
+  FIND DECORATED WITH <decorator> [IN functions|classes] [WHERE <expression>] [clauses]
+    FIND DECORATED WITH "@dataclass"
+    FIND DECORATED WITH "router" IN functions LIMIT 50
+
+  ENFORCE <rule> [IN <scope>]
+    ENFORCE "domain MUST_NOT_IMPORT infrastructure"
+    ENFORCE "domain <- application <- infrastructure"
+    ENFORCE "NO_CIRCULAR_DEPENDENCIES"
+    ENFORCE "classes IN 'domain/entities' MUST_BE decorated_with 'dataclass'"
+
+Types, predicates, and clauses
+------------------------------
+  Types: functions, classes, files, folders, routes, middlewares, declarations,
+         modules, packages, ALL
+
+  Predicates: ==, =, !=, >, >=, <, <=, LIKE, CONTAINS, STARTSWITH, ENDSWITH,
+              =~ / MATCHES, !~ / NOT MATCHES, NOT LIKE, NOT CONTAINS,
+              NOT STARTSWITH, NOT ENDSWITH, NOT IN
+    GET functions WHERE name LIKE "test_*" AND lines_count > 10
+    GET functions WHERE file_path CONTAINS "sales" OR name STARTSWITH "create_"
+    GET functions WHERE NOT is_async == true
+
+  Common clauses: ORDER BY <field> [ASC|DESC], LIMIT n, OFFSET n, RANGE start:end,
+                  LIMIT ALL, GROUP BY <field>, WITH callers|callees, DEPTH n
+    GET functions ORDER BY lines_count DESC LIMIT 20
+    SEARCH "service" IN functions OFFSET 20 LIMIT 20
+    GET functions RANGE 0:50
+
+Pagination and output
+---------------------
+  GET and FIND DECORATED default to 100 results. SEARCH and GLOB default to 20.
+  Explicit finite limits are capped at 1000; LIMIT ALL bypasses the cap.
+  Paginated results include meta.truncated and a next-page hint.
+  Symbol listings are compact and grouped by file for token safety. Use a field
+  projection or METADATA FOR <node-id> for complete metadata.
+  Set expand_body=true on this tool call to return full body text; otherwise
+  body_preview is limited to 150 characters.
+
+Recovery
+--------
+  Parse errors include a command-specific example. If a node ID is unknown,
+  use SEARCH first or rely on the "Did you mean" suggestion. Query results set
+  meta.index_stale=true when parser/index configuration changed and a rescan is
+  required.
+"""
+
 _event_handler = None
 
 # Track whether API call re-linking is needed since last rebuild
@@ -87,11 +226,15 @@ def _drain_sync_queue():
 @mcp.tool()
 def query_dsl_help():
     """
-     A full documentation for using query dsl tool with the right syntax
+     Practical reference for every supported Cordyceps Query DSL command.
     """
-    return  """?start: query
+    return QUERY_DSL_HELP
 
-query: stats_query | get_query | search_query | glob_query | metadata_query | impact_query | path_query | flow_query | stack_query | audit_query | check_layers_query | layers_of_query | find_implements_query | find_decorated_query | enforce_query
+    # Legacy raw grammar retained below for source-level parser debugging only.
+    # The MCP tool intentionally returns the operational reference above.
+    return  r"""?start: query
+
+query: stats_query | get_query | search_query | glob_query | metadata_query | impact_query | path_query | flow_query | stack_query | check_layers_query | layers_of_query | find_implements_query | find_decorated_query | enforce_query
 
 // ── GLOB query ──
 glob_query: GLOB_KW (QSTRING | IDENTIFIER) (WHERE_KW bool_expr)? get_clause*
@@ -172,9 +315,6 @@ flow_query: FLOW_KW (FOR_KW | OF_KW | FROM_KW)? QSTRING (THROUGH_KW IDENTIFIER+)
 // ── STACK query ──
 stack_query: STACK_KW (FOR_KW | OF_KW)? QSTRING
 
-// ── AUDIT query ──
-audit_query: AUDIT_KW (TENANT_KW | ISOLATION_KW)? (FOR_KW | OF_KW)? (QSTRING | IDENTIFIER)?
-
 // ── CHECK LAYERS query ──
 check_layers_query: CHECK_KW LAYERS_KW QSTRING AGAINST_KW QSTRING
 
@@ -241,9 +381,6 @@ TO_KW: "TO"i
 FLOW_KW: "FLOW"i
 THROUGH_KW: "THROUGH"i
 STACK_KW: "STACK"i
-AUDIT_KW: "AUDIT"i
-TENANT_KW: "TENANT"i
-ISOLATION_KW: "ISOLATION"i
 CHECK_KW: "CHECK"i
 LAYERS_KW: "LAYERS"i
 AGAINST_KW: "AGAINST"i
@@ -310,7 +447,7 @@ def query_dsl(raw: str, expand_body: bool = False) -> str:
       - Architecture check: CHECK LAYERS "domain" AGAINST "infrastructure"
       - Count functions: GET COUNT(*) FROM functions WHERE file_path CONTAINS "src"
 
-    Call query_dsl_help for the complete grammar. Parse errors include a relevant
+    Call query_dsl_help for the complete command reference. Parse errors include a relevant
     example to help construct the next query.
 
     Parameters:

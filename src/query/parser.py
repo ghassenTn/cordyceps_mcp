@@ -171,11 +171,6 @@ class StackQuery:
 
 
 @dataclass
-class AuditQuery:
-    module: str = "sales"
-
-
-@dataclass
 class CheckLayersQuery:
     layer: str
     against: str
@@ -650,15 +645,6 @@ class _QueryTransformer(Transformer):
             elif isinstance(item, str) and api_endpoint == "":
                 api_endpoint = item.strip("'\"")
         return StackQuery(api_endpoint=api_endpoint)
-
-    def audit_query(self, items):
-        module = "sales"
-        for item in items:
-            if isinstance(item, str) and item.startswith(("'", '"')):
-                module = item.strip("'\"")
-            elif isinstance(item, str) and item.lower() not in ("audit", "tenant", "isolation", "for", "of"):
-                module = item.strip("'\"")
-        return AuditQuery(module=module)
 
     def check_layers_query(self, items):
         layer = ""

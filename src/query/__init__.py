@@ -17,15 +17,15 @@ Example queries:
     FIND DECORATED WITH '@dataclass'
     ENFORCE 'domain MUST_NOT_IMPORT infrastructure'
     ENFORCE 'domain <- application <- infrastructure'
-    ENFORCE NO_CIRCULAR_DEPENDENCIES IN 'pos_caisse'
+    ENFORCE "NO_CIRCULAR_DEPENDENCIES" IN 'pos_caisse'
     ENFORCE "MUST_BE decorated_with '@dataclass'"
 """
 
 from __future__ import annotations
 import logging
 
-from .parser import parse_query, GetQuery, SearchQuery, GlobQuery, MetadataQuery, ImpactQuery, PathQuery, FlowQuery, StackQuery, AuditQuery, CheckLayersQuery, LayersOfQuery, FindImplementsQuery, FindDecoratedQuery, EnforceQuery, StatsQuery
-from .compiler import compile_get, compile_search, compile_glob, compile_metadata, compile_impact, compile_path, compile_flow, compile_stack, compile_audit, compile_check_layers, compile_layers_of, compile_find_implements, compile_find_decorated, compile_enforce, compile_stats
+from .parser import parse_query, GetQuery, SearchQuery, GlobQuery, MetadataQuery, ImpactQuery, PathQuery, FlowQuery, StackQuery, CheckLayersQuery, LayersOfQuery, FindImplementsQuery, FindDecoratedQuery, EnforceQuery, StatsQuery
+from .compiler import compile_get, compile_search, compile_glob, compile_metadata, compile_impact, compile_path, compile_flow, compile_stack, compile_check_layers, compile_layers_of, compile_find_implements, compile_find_decorated, compile_enforce, compile_stats
 
 logger = logging.getLogger(__name__)
 
@@ -154,8 +154,6 @@ def query(client: object, raw: str, expand_body: bool = False) -> dict:
             res = compile_flow(client, parsed)
         elif isinstance(parsed, StackQuery):
             res = compile_stack(client, parsed)
-        elif isinstance(parsed, AuditQuery):
-            res = compile_audit(client, parsed)
         elif isinstance(parsed, CheckLayersQuery):
             res = compile_check_layers(client, parsed)
         elif isinstance(parsed, LayersOfQuery):
