@@ -134,6 +134,7 @@ All legacy search / impact / flow / full-stack capabilities are available throug
 
 ---
 ## IDE Integration (example kiro ide)
+'''json
 {
   "mcpServers": {
     "cordyceps": {
@@ -154,7 +155,7 @@ All legacy search / impact / flow / full-stack capabilities are available throug
     }
 
   }
-}
+}'''
 
 ## 🧪 Testing
 
