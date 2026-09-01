@@ -133,6 +133,28 @@ Executes a Cordyceps Query DSL string against the live CSR graph. All outputs ar
 All legacy search / impact / flow / full-stack capabilities are available through `query_dsl` with the appropriate verb — see `query_dsl_help` for the complete grammar.
 
 ---
+## IDE Integration (example kiro ide)
+{
+  "mcpServers": {
+    "cordyceps": {
+      "command": "uv",
+      "args": [
+        "--directory",
+        "/path/to/cordyceps_mcp",
+        "run",
+        "--python",
+        "3.11",
+        "python",
+        "/path/to/cordyceps_mcp/main.py",
+        "/path/to/your workspace"
+      ],
+      "autoApprove": [
+        "query_dsl"
+      ]
+    }
+
+  }
+}
 
 ## 🧪 Testing
 
