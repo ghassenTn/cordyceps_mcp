@@ -236,19 +236,22 @@ SUPPORTED_EXTENSIONS = tuple(sorted(set(LANGUAGE_ADAPTERS) | set(NON_CODE_EXTENS
 # fields, nested-definition indexing, ...). Persisted indexes built by an older
 # parser are then detected as stale instead of silently answering from a graph
 # that lacks the new nodes.
-PARSER_SCHEMA_VERSION = "python-contextual-calls-v3"
+PARSER_SCHEMA_VERSION = "contextual-js-ts-v1"
 
 
 def compute_index_fingerprint() -> str:
     """Deterministic fingerprint of the current indexing configuration.
 
-    Changes whenever supported languages/extensions are added or removed (e.g.
-    a JS/TS adapter being disabled) or the parser's extraction schema changes,
-    so a persisted index can be detected as stale and rebuilt instead of
-    silently answering from outdated data.
+    Includes the complete flattened language configs, not only extensions, so
+    changing an extraction node type or feature flag invalidates old snapshots.
     """
     import hashlib
-    raw = "|".join([PARSER_SCHEMA_VERSION, *SUPPORTED_EXTENSIONS])
+    import json
+    raw = json.dumps({
+        "schema": PARSER_SCHEMA_VERSION,
+        "languages": {ext: adapter.config for ext, adapter in sorted(LANGUAGE_ADAPTERS.items())},
+        "non_code_extensions": sorted(NON_CODE_EXTENSIONS),
+    }, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 

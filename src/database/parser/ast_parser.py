@@ -153,6 +153,9 @@ class UniversalCodeParser:
             if is_class:
                 class_info = self._extract_node_info(node, code_bytes, lang_config)
                 class_info['methods'] = self._extract_methods(node, code_bytes, lang_config)
+                if str(lang_config.get("language", "")).startswith(("javascript", "typescript")):
+                    class_info['_javascript_receiver_types'] = \
+                        self._extract_javascript_class_receivers(node)
                 if lang_config.get("django_relations", False):
                     class_info['django_relations'] = self._extract_django_relations(node, code_bytes, lang_config)
                 class_scope = f"{scope}.{class_info['name']}" if scope else class_info['name']
@@ -172,6 +175,11 @@ class UniversalCodeParser:
                 func_info = self._extract_node_info(node, code_bytes, lang_config)
                 func_info['calls'] = self._extract_calls(node, code_bytes, lang_config)
                 func_info['returns'] = self._extract_returns(node, code_bytes, lang_config)
+                if str(lang_config.get("language", "")).startswith(("javascript", "typescript")):
+                    shadows, receivers = self._javascript_context_from_node(node, lang_config)
+                    func_info['javascript_shadowed_names'] = shadows
+                    func_info['javascript_receiver_types'] = receivers
+                    func_info['javascript_lexical_this'] = False
                 func_scope = f"{scope}.{func_info['name']}" if scope else func_info['name']
                 func_info['node_name'] = func_scope
                 functions.append(func_info)
@@ -215,12 +223,21 @@ class UniversalCodeParser:
 
                 for child in node.children:
                     if child.type in variable_declarator_nodes:
-                        has_arrow = any(n.type in arrow_function_nodes for n in child.children)
-                        wrapped_fn = None if has_arrow else _find_wrapped_fn(child)
-                        if has_arrow or wrapped_fn is not None:
+                        has_function_value = any(
+                            n.type in (arrow_function_nodes + function_expression_nodes)
+                            for n in child.children
+                        )
+                        wrapped_fn = None if has_function_value else _find_wrapped_fn(child)
+                        if has_function_value or wrapped_fn is not None:
                             func_info = self._extract_node_info(child, code_bytes, lang_config, override_name=True)
                             func_info['calls'] = self._extract_calls(child, code_bytes, lang_config)
                             func_info['returns'] = self._extract_returns(child, code_bytes, lang_config)
+                            if str(lang_config.get("language", "")).startswith(("javascript", "typescript")):
+                                shadows, receivers = self._javascript_context_from_node(
+                                    child, lang_config)
+                                func_info['javascript_shadowed_names'] = shadows
+                                func_info['javascript_receiver_types'] = receivers
+                                func_info['javascript_lexical_this'] = True
                             func_scope = f"{scope}.{func_info['name']}" if scope else func_info['name']
                             func_info['node_name'] = func_scope
                             functions.append(func_info)
@@ -262,13 +279,39 @@ class UniversalCodeParser:
         for node in root_node.children:
             walk_ast(node, is_top_level=True)
 
+        javascript_language = str(lang_config.get("language", "")).startswith(
+            ("javascript", "typescript"))
+        if javascript_language:
+            known = {fn.get("node_name") for fn in functions}
+            for function in self._extract_javascript_default_callables(
+                    root_node, code_bytes, lang_config):
+                if function.get("node_name") not in known:
+                    functions.append(function)
+                    known.add(function.get("node_name"))
+
         imports, import_lines = self._extract_imports(root_node, code_bytes, lang_config)
         file_level_calls = self._extract_calls(root_node, code_bytes, lang_config)
         exports = self._extract_exports(root_node, code_bytes, lang_config)
+        javascript_import_bindings = {}
+        javascript_import_sources = []
+        javascript_exports = {}
+        if javascript_language:
+            javascript_import_bindings, javascript_import_sources = \
+                self._extract_javascript_import_bindings(
+                root_node, code_bytes)
+            javascript_exports = self._extract_javascript_export_map(root_node, code_bytes)
+            for record in javascript_exports.values():
+                records = record if isinstance(record, list) else [record]
+                javascript_import_sources.extend(
+                    item.get("source") for item in records
+                    if isinstance(item, dict) and item.get("source"))
+            javascript_import_sources = sorted(set(javascript_import_sources))
         declarations = self._extract_declarations(root_node, code_bytes, lang_config) if lang_config.get("features", {}).get("declarations", False) else []
         frameworks = self._detect_framework(root_node, file_path, lang_config)
         all_routes, inline_handlers = self._extract_routes(root_node, code_bytes, lang_config)
         functions.extend(inline_handlers)
+        if javascript_language:
+            self._annotate_javascript_context(functions, classes)
         http_calls = self._extract_http_calls(root_node, code_bytes, lang_config) if lang_config.get("http_calls", False) else []
         url_patterns = self._extract_url_patterns(root_node, code_bytes, lang_config) if lang_config.get("url_patterns", False) else []
         middleware = self._extract_middleware(root_node, code_bytes,
@@ -390,6 +433,9 @@ class UniversalCodeParser:
             "file_path": file_path,
             "imports": imports,
             "import_lines": import_lines,
+            "javascript_import_bindings": javascript_import_bindings,
+            "javascript_import_sources": javascript_import_sources,
+            "javascript_exports": javascript_exports,
             "exports": exports,
             "classes": classes,
             "functions": functions,
@@ -680,6 +726,11 @@ class UniversalCodeParser:
             if actual_class:
                 class_node = actual_class
 
+        javascript = str(lang_config.get("language", "")).startswith(
+            ("javascript", "typescript"))
+        class_receivers = self._extract_javascript_class_receivers(class_node) \
+            if javascript else {}
+
         body_node = next((n for n in class_node.children if n.type == class_body), None)
         if body_node:
             method_nodes = lang_config.get("method_nodes", [])
@@ -691,10 +742,25 @@ class UniversalCodeParser:
                 elif child.type in method_nodes:
                     is_method = True
 
+                # A JS/TS class field is executable only when its value is an
+                # arrow/function expression. Plain data fields are not methods.
+                if is_method and child.type in ("field_definition", "public_field_definition"):
+                    value = child.child_by_field_name("value")
+                    callable_types = set(lang_config.get(
+                        "arrow_function_nodes", ["arrow_function"])) | set(
+                        lang_config.get("function_expression_nodes", ["function_expression"]))
+                    is_method = value is not None and value.type in callable_types
+
                 if is_method:
                     meth_info = self._extract_node_info(child, code_bytes, lang_config)
                     meth_info['calls'] = self._extract_calls(child, code_bytes, lang_config)
                     meth_info['returns'] = self._extract_returns(child, code_bytes, lang_config)
+                    if javascript:
+                        shadows, receivers = self._javascript_context_from_node(
+                            child, lang_config, class_receivers)
+                        meth_info['javascript_shadowed_names'] = shadows
+                        meth_info['javascript_receiver_types'] = receivers
+                        meth_info['javascript_lexical_this'] = True
                     methods.append(meth_info)
         return methods
 
@@ -721,6 +787,7 @@ class UniversalCodeParser:
         arrow_containers = self._node_types(lang_config, "arrow_nodes")
         variable_declarators = self._node_types(lang_config, "variable_declarator_nodes")
         arrow_function_nodes = self._node_types(lang_config, "arrow_function_nodes")
+        function_expression_nodes = self._node_types(lang_config, "function_expression_nodes")
         name_ids = self._node_types(lang_config, "name_identifiers")
         body_nodes = self._node_types(lang_config, "body_nodes")
         decorated = lang_config.get("decorated_definition", "decorated_definition")
@@ -748,16 +815,20 @@ class UniversalCodeParser:
                 return "class", n
             if n.type in func_nodes or n.type in method_nodes:
                 return "function", n
+            if n.type in arrow_function_nodes | function_expression_nodes:
+                return "function", n
             if n.type in arrow_containers:
                 for d in n.children:
                     if d.type in variable_declarators and any(
-                        c.type in arrow_function_nodes for c in d.children
+                        c.type in arrow_function_nodes | function_expression_nodes for c in d.children
                     ):
                         return "function", d
             return None, None
 
         def _name_of(n):
             inner = _unwrap(n)
+            if inner.type in arrow_function_nodes | function_expression_nodes:
+                return f"callback_L{inner.start_point[0] + 1}_C{inner.start_point[1] + 1}"
             nid = next((c for c in inner.children if c.type in name_ids), None)
             return nid.text.decode('utf-8', errors='replace') if nid is not None else None
 
@@ -793,6 +864,9 @@ class UniversalCodeParser:
                     c_info = self._extract_node_info(wrap, code_bytes, lang_config)
                     c_info["node_name"] = child_scope
                     c_methods = self._extract_methods(wrap, code_bytes, lang_config)
+                    if str(lang_config.get("language", "")).startswith(("javascript", "typescript")):
+                        c_info['_javascript_receiver_types'] = \
+                            self._extract_javascript_class_receivers(_unwrap(wrap))
                     for m in c_methods:
                         m["node_name"] = f"{child_scope}.{m['name']}"
                     c_info["methods"] = c_methods
@@ -815,9 +889,19 @@ class UniversalCodeParser:
 
                 override = wrap.type in arrow_containers
                 f_info = self._extract_node_info(wrap, code_bytes, lang_config, override_name=override)
+                if wrap.type in arrow_function_nodes | function_expression_nodes:
+                    f_info["name"] = bare
                 f_info["node_name"] = child_scope
                 f_info["calls"] = self._extract_calls(wrap, code_bytes, lang_config)
                 f_info["returns"] = self._extract_returns(wrap, code_bytes, lang_config)
+                if str(lang_config.get("language", "")).startswith(("javascript", "typescript")):
+                    shadows, receivers = self._javascript_context_from_node(wrap, lang_config)
+                    f_info['javascript_shadowed_names'] = shadows
+                    f_info['javascript_receiver_types'] = receivers
+                    value = (wrap.child_by_field_name("value")
+                             if wrap.type in variable_declarators else wrap)
+                    f_info['javascript_lexical_this'] = (
+                        value is not None and value.type in arrow_function_nodes)
                 functions.append(f_info)
                 if body is not None:
                     _scan(body, child_scope, False)
@@ -887,6 +971,563 @@ class UniversalCodeParser:
         
         walk(node)
         return list(dict.fromkeys(returns))
+
+    @staticmethod
+    def _js_text(node) -> str:
+        return node.text.decode("utf-8", errors="replace") if node is not None else ""
+
+    @classmethod
+    def _js_string(cls, node) -> str:
+        return cls._js_text(node).strip().strip("'\"")
+
+    @staticmethod
+    def _js_descendants(node, *types):
+        wanted = set(types)
+        stack = list(getattr(node, "children", ()))
+        while stack:
+            current = stack.pop()
+            if current.type in wanted:
+                yield current
+            stack.extend(reversed(getattr(current, "children", ())))
+
+    @staticmethod
+    def _js_module_statements(root_node):
+        """Statements in module/control-flow scope, excluding callable/class bodies."""
+        blocked = {
+            "function_declaration", "generator_function_declaration",
+            "function_expression", "arrow_function", "class_declaration",
+            "abstract_class_declaration", "method_definition",
+        }
+
+        def walk(node):
+            for child in node.children:
+                yield child
+                if child.type not in blocked:
+                    yield from walk(child)
+
+        return walk(root_node)
+
+    def _extract_javascript_import_bindings(self, root_node, code_bytes: bytes) -> tuple[dict, list]:
+        """Module-scope ESM/CommonJS bindings used by contextual call resolution."""
+        bindings = {}
+        sources = set()
+
+        def add(local, kind, source, imported=None, type_only=False):
+            if local and source:
+                sources.add(source)
+                bindings[local] = {
+                    "kind": kind,
+                    "source": source,
+                    "imported": imported,
+                    "type_only": bool(type_only),
+                }
+
+        def require_info(value):
+            if value is None:
+                return None, None
+            call = value
+            imported = None
+            if value.type == "member_expression":
+                call = value.child_by_field_name("object")
+                prop = value.child_by_field_name("property")
+                imported = self._js_text(prop)
+            if call is None or call.type != "call_expression":
+                return None, None
+            if self._js_text(call.child_by_field_name("function")) != "require":
+                return None, None
+            args = call.child_by_field_name("arguments")
+            string = next(self._js_descendants(args, "string"), None) if args else None
+            return self._js_string(string), imported
+
+        for node in self._js_module_statements(root_node):
+            if node.type == "import_statement":
+                source = self._js_string(node.child_by_field_name("source"))
+                if source:
+                    sources.add(source)
+                type_only = any(c.type == "type" for c in node.children)
+                clause = next((c for c in node.children if c.type == "import_clause"), None)
+                if clause is None:
+                    # TypeScript: import Alias = require("./module")
+                    require_clause = next(
+                        self._js_descendants(node, "import_require_clause"), None)
+                    if require_clause is not None:
+                        local = next(self._js_descendants(require_clause, "identifier"), None)
+                        req_source = next(self._js_descendants(require_clause, "string"), None)
+                        add(self._js_text(local), "namespace", self._js_string(req_source))
+                    continue
+                for child in clause.children:
+                    if child.type == "identifier":
+                        add(self._js_text(child), "default", source, "default", type_only)
+                    elif child.type == "namespace_import":
+                        local = next(self._js_descendants(child, "identifier"), None)
+                        add(self._js_text(local), "namespace", source, None, type_only)
+                    elif child.type == "named_imports":
+                        for spec in self._js_descendants(child, "import_specifier"):
+                            imported_node = spec.child_by_field_name("name")
+                            alias_node = spec.child_by_field_name("alias")
+                            imported = self._js_text(imported_node)
+                            local = self._js_text(alias_node) or imported
+                            kind = "default" if imported == "default" else "named"
+                            add(local, kind, source, imported, type_only)
+                continue
+
+            if node.type == "expression_statement":
+                assignment = next(self._js_descendants(
+                    node, "assignment_expression"), None)
+                if assignment is not None:
+                    left = assignment.child_by_field_name("left")
+                    if left is not None and left.type == "identifier":
+                        local = self._js_text(left)
+                        source, imported = require_info(
+                            assignment.child_by_field_name("right"))
+                        if source:
+                            add(local, "named" if imported else "commonjs",
+                                source, imported)
+                        else:
+                            bindings.pop(local, None)
+                call = next(self._js_descendants(node, "call_expression"), None)
+                source, _ = require_info(call)
+                if source:
+                    sources.add(source)
+                continue
+
+            if node.type not in ("lexical_declaration", "variable_declaration"):
+                continue
+            for declarator in (c for c in node.children if c.type == "variable_declarator"):
+                name = declarator.child_by_field_name("name")
+                source, imported = require_info(declarator.child_by_field_name("value"))
+                if not source or name is None:
+                    continue
+                if name.type == "identifier":
+                    add(self._js_text(name), "named" if imported else "commonjs",
+                        source, imported)
+                elif name.type == "object_pattern":
+                    for item in name.children:
+                        if item.type == "shorthand_property_identifier_pattern":
+                            value = self._js_text(item)
+                            add(value, "named", source, value)
+                        elif item.type == "pair_pattern":
+                            imported_name = self._js_text(item.child_by_field_name("key"))
+                            local = self._js_text(item.child_by_field_name("value"))
+                            add(local, "named", source, imported_name)
+        return bindings, sorted(sources)
+
+    def _extract_javascript_export_map(self, root_node, code_bytes: bytes) -> dict:
+        """Map public export names to local definitions or re-export sources."""
+        exports = {}
+        common_export_names = set()
+
+        def add_local(exported, local):
+            if exported and local:
+                exports[exported] = {"kind": "local", "local": local}
+
+        for node in self._js_module_statements(root_node):
+            if node.type != "export_statement":
+                continue
+            source = self._js_string(node.child_by_field_name("source"))
+            is_default = any(c.type == "default" for c in node.children)
+            clause = next((c for c in node.children if c.type == "export_clause"), None)
+            if clause is not None:
+                for spec in self._js_descendants(clause, "export_specifier"):
+                    local = self._js_text(spec.child_by_field_name("name"))
+                    alias = self._js_text(spec.child_by_field_name("alias")) or local
+                    if source:
+                        exports[alias] = {"kind": "reexport", "source": source,
+                                          "imported": local}
+                    else:
+                        add_local(alias, local)
+                continue
+
+            if source and any(c.type == "*" for c in node.children):
+                exports.setdefault("*", []).append({"kind": "star", "source": source})
+                continue
+
+            value = node.child_by_field_name("value") or node.child_by_field_name("declaration")
+            if value is None:
+                value = next((c for c in node.children if c.type in {
+                    "function_declaration", "generator_function_declaration",
+                    "class_declaration", "abstract_class_declaration",
+                    "lexical_declaration", "variable_declaration", "identifier",
+                }), None)
+            if value is None:
+                continue
+            if value.type in ("function_declaration", "generator_function_declaration",
+                              "class_declaration", "abstract_class_declaration"):
+                name = self._js_text(value.child_by_field_name("name"))
+                if not name and is_default:
+                    name = f"anonymous_L{value.start_point[0] + 1}"
+                add_local("default" if is_default else name, name)
+            elif value.type == "identifier" and is_default:
+                add_local("default", self._js_text(value))
+            elif value.type in ("arrow_function", "function_expression") and is_default:
+                add_local("default", f"anonymous_L{value.start_point[0] + 1}")
+            elif value.type in ("lexical_declaration", "variable_declaration"):
+                for declarator in (c for c in value.children if c.type == "variable_declarator"):
+                    name = self._js_text(declarator.child_by_field_name("name"))
+                    add_local("default" if is_default else name, name)
+
+        for node in self._js_module_statements(root_node):
+            if node.type != "expression_statement":
+                continue
+            assignment = next(self._js_descendants(node, "assignment_expression"), None)
+            if assignment is None:
+                continue
+            left = self._js_text(assignment.child_by_field_name("left"))
+            right = assignment.child_by_field_name("right")
+            if right is None:
+                continue
+            if left in ("module.exports", "exports.default"):
+                if left == "module.exports":
+                    for name in common_export_names:
+                        exports.pop(name, None)
+                    common_export_names.clear()
+                else:
+                    exports.pop("default", None)
+                    common_export_names.discard("default")
+                if right.type == "identifier":
+                    add_local("default", self._js_text(right))
+                    common_export_names.add("default")
+                elif right.type == "object":
+                    for item in right.children:
+                        if item.type == "shorthand_property_identifier":
+                            name = self._js_text(item)
+                            add_local(name, name)
+                            common_export_names.add(name)
+                        elif item.type == "pair":
+                            exported = self._js_text(item.child_by_field_name("key"))
+                            local = self._js_text(item.child_by_field_name("value"))
+                            if exported and local and item.child_by_field_name("value").type == "identifier":
+                                add_local(exported, local)
+                                common_export_names.add(exported)
+            elif left.startswith("module.exports.") or left.startswith("exports."):
+                exported = left.rsplit(".", 1)[-1]
+                exports.pop(exported, None)
+                common_export_names.discard(exported)
+                if right.type == "identifier":
+                    add_local(exported, self._js_text(right))
+                    common_export_names.add(exported)
+        return exports
+
+    def _extract_javascript_default_callables(self, root_node, code_bytes: bytes,
+                                              lang_config: dict) -> list:
+        functions = []
+        for node in root_node.children:
+            if node.type != "export_statement" or not any(
+                    child.type == "default" for child in node.children):
+                continue
+            value = node.child_by_field_name("value") or node.child_by_field_name("declaration")
+            if value is None:
+                value = next((child for child in node.children if child.type in {
+                    "arrow_function", "function_expression"}), None)
+            if value is None or value.type not in ("arrow_function", "function_expression"):
+                continue
+            info = self._extract_node_info(value, code_bytes, lang_config)
+            info["node_name"] = info["name"]
+            info["calls"] = self._extract_calls(value, code_bytes, lang_config)
+            info["returns"] = self._extract_returns(value, code_bytes, lang_config)
+            info["is_exported"] = True
+            shadows, receivers = self._javascript_context_from_node(value, lang_config)
+            info["javascript_shadowed_names"] = shadows
+            info["javascript_receiver_types"] = receivers
+            info["javascript_lexical_this"] = True
+            functions.append(info)
+        return functions
+
+    @staticmethod
+    def _javascript_type_name(raw: str) -> str | None:
+        import re
+        text = str(raw or "").strip().lstrip(":").strip()
+        if not text or any(op in text for op in ("|", "&")):
+            return None
+        text = re.sub(r"<.*>", "", text).replace("[]", "").strip()
+        match = re.match(r"[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*", text)
+        return match.group(0) if match else None
+
+    def _javascript_bound_names(self, pattern) -> list[str]:
+        if pattern is None:
+            return []
+        if pattern.type in ("identifier", "shorthand_property_identifier_pattern"):
+            return [self._js_text(pattern)]
+        if pattern.type == "pair_pattern":
+            return self._javascript_bound_names(pattern.child_by_field_name("value"))
+        if pattern.type in ("rest_pattern", "assignment_pattern"):
+            target = (pattern.child_by_field_name("argument")
+                      or pattern.child_by_field_name("left"))
+            return self._javascript_bound_names(target)
+        names = []
+        for child in pattern.children:
+            if child.is_named:
+                names.extend(self._javascript_bound_names(child))
+        return list(dict.fromkeys(name for name in names if name))
+
+    def _extract_javascript_class_receivers(self, class_node) -> dict:
+        """Types of ``this.field`` from TS fields and parameter properties."""
+        receivers = {}
+        actual = class_node
+        body = actual.child_by_field_name("body")
+        if body is None:
+            body = next((c for c in actual.children if c.type == "class_body"), None)
+        if body is None:
+            return receivers
+        for child in body.children:
+            if child.type in ("field_definition", "public_field_definition"):
+                name = self._js_text(child.child_by_field_name("name"))
+                type_node = child.child_by_field_name("type")
+                value = child.child_by_field_name("value")
+                type_name = self._javascript_type_name(self._js_text(type_node))
+                if type_name is None and value is not None and value.type == "new_expression":
+                    type_name = self._js_text(value.child_by_field_name("constructor"))
+                if name and type_name:
+                    receivers[f"this.{name}"] = type_name
+            elif child.type == "method_definition" and self._js_text(
+                    child.child_by_field_name("name")) == "constructor":
+                params = child.child_by_field_name("parameters")
+                param_types = {}
+                for param in self._js_descendants(params, "required_parameter") if params else ():
+                    name = self._js_text(param.child_by_field_name("pattern"))
+                    type_name = self._javascript_type_name(
+                        self._js_text(param.child_by_field_name("type")))
+                    if name and type_name:
+                        param_types[name] = type_name
+                    if not any(c.type == "accessibility_modifier" for c in param.children):
+                        continue
+                    if name and type_name:
+                        receivers[f"this.{name}"] = type_name
+                body_node = child.child_by_field_name("body")
+                assignments = []
+
+                def collect(current):
+                    for nested in current.children:
+                        if nested.type in {
+                                "function_declaration", "function_expression",
+                                "arrow_function", "class_declaration"}:
+                            continue
+                        if nested.type == "assignment_expression":
+                            assignments.append(nested)
+                        collect(nested)
+
+                if body_node is not None:
+                    collect(body_node)
+                candidates = {}
+                for assignment in assignments:
+                    left = self._js_text(assignment.child_by_field_name("left"))
+                    right = assignment.child_by_field_name("right")
+                    if not left.startswith("this.") or right is None:
+                        continue
+                    if right.type == "new_expression":
+                        type_name = self._js_text(right.child_by_field_name("constructor"))
+                    elif right.type == "identifier":
+                        type_name = param_types.get(self._js_text(right))
+                    else:
+                        type_name = None
+                    candidates.setdefault(left, set()).add(type_name)
+                for name, types in candidates.items():
+                    if len(types) == 1 and None not in types:
+                        receivers[name] = next(iter(types))
+                    else:
+                        receivers.pop(name, None)
+        return receivers
+
+    def _javascript_context_from_node(self, node, lang_config: dict,
+                                      inherited_receivers=None) -> tuple[list, dict]:
+        """Scope-aware shadows/receiver types for one JS/TS callable AST node."""
+        shadows = set()
+        receivers = dict(inherited_receivers or {})
+        declared_types = set()
+        ambiguous_receivers = set()
+        first_receiver_use = {}
+        function_types = set(lang_config.get("function_nodes", [])) \
+            | set(lang_config.get("method_nodes", [])) \
+            | set(lang_config.get("arrow_function_nodes", [])) \
+            | set(lang_config.get("function_expression_nodes", [])) \
+            | set(lang_config.get("class_nodes", []))
+
+        target = node
+        if node.type in ("variable_declarator", "field_definition", "public_field_definition"):
+            value = node.child_by_field_name("value")
+            if value is not None:
+                target = value
+        params = target.child_by_field_name("parameters")
+        if params is not None:
+            for param in self._js_descendants(
+                    params, "required_parameter", "optional_parameter"):
+                pattern = param.child_by_field_name("pattern")
+                names = self._javascript_bound_names(pattern)
+                if not names:
+                    continue
+                shadows.update(names)
+                type_name = self._javascript_type_name(
+                    self._js_text(param.child_by_field_name("type")))
+                if type_name and len(names) == 1:
+                    receivers[names[0]] = type_name
+                    declared_types.add(names[0])
+                else:
+                    for name in names:
+                        receivers[name] = None
+            for child in params.children:
+                if child.type == "identifier":
+                    name = self._js_text(child)
+                    shadows.add(name)
+                    receivers[name] = None
+        single_param = target.child_by_field_name("parameter")
+        if single_param is not None:
+            name = self._js_text(single_param)
+            if name:
+                shadows.add(name)
+                receivers[name] = None
+
+        body = target.child_by_field_name("body")
+        if body is None:
+            body = next((c for c in target.children if c.type in {
+                "statement_block", "block"}), None)
+        if body is None:
+            return sorted(shadows), receivers
+
+        def assign_receiver(left, right):
+            key = self._js_text(left)
+            simple_member = (left is not None and left.type == "member_expression"
+                             and all(part and part.replace("#", "").replace("$", "_").isidentifier()
+                                     for part in key.split(".")))
+            if not key or not (left.type == "identifier" or simple_member):
+                return
+            shadows.add(key)
+            if key in declared_types:
+                return
+            if first_receiver_use.get(key, left.start_byte) < left.start_byte:
+                receivers.pop(key, None)
+                ambiguous_receivers.add(key)
+                return
+            if right is not None and right.type == "new_expression":
+                type_name = self._js_text(right.child_by_field_name("constructor"))
+                if type_name:
+                    previous = receivers.get(key)
+                    if key in ambiguous_receivers or (previous and previous != type_name):
+                        receivers.pop(key, None)
+                        ambiguous_receivers.add(key)
+                    else:
+                        receivers[key] = type_name
+                    return
+            if right is not None and right.type == "identifier" and self._js_text(right) in receivers:
+                type_name = receivers[self._js_text(right)]
+                previous = receivers.get(key)
+                if key in ambiguous_receivers or (previous and previous != type_name):
+                    receivers.pop(key, None)
+                    ambiguous_receivers.add(key)
+                else:
+                    receivers[key] = type_name
+                return
+            receivers.pop(key, None)
+            ambiguous_receivers.add(key)
+
+        def walk(current):
+            for child in current.children:
+                if child.type in function_types:
+                    continue
+                if child.type == "variable_declarator":
+                    name_node = child.child_by_field_name("name")
+                    bound_names = self._javascript_bound_names(name_node)
+                    value = child.child_by_field_name("value")
+                    callable_value = value is not None and value.type in (
+                        set(lang_config.get("arrow_function_nodes", []))
+                        | set(lang_config.get("function_expression_nodes", [])))
+                    if not callable_value:
+                        shadows.update(bound_names)
+                        for bound_name in bound_names:
+                            receivers[bound_name] = None
+                    if (not callable_value and name_node is not None
+                            and name_node.type == "identifier"):
+                        name = bound_names[0]
+                        type_name = self._javascript_type_name(
+                            self._js_text(child.child_by_field_name("type")))
+                        if type_name:
+                            receivers[name] = type_name
+                            declared_types.add(name)
+                        if value is not None and not type_name:
+                            assign_receiver(name_node, value)
+                elif child.type == "assignment_expression":
+                    assign_receiver(child.child_by_field_name("left"),
+                                    child.child_by_field_name("right"))
+                elif child.type == "catch_clause":
+                    parameter = child.child_by_field_name("parameter")
+                    shadows.update(self._javascript_bound_names(parameter))
+                elif child.type == "call_expression":
+                    function = child.child_by_field_name("function")
+                    if function is not None and function.type == "member_expression":
+                        obj = self._js_text(function.child_by_field_name("object"))
+                        obj = obj.strip().strip("()").rstrip("!")
+                        if obj:
+                            first_receiver_use.setdefault(obj, child.start_byte)
+                walk(child)
+
+        walk(body)
+        return sorted(name for name in shadows if name), receivers
+
+    def _javascript_callable_context(self, info: dict, inherited_receivers=None) -> tuple[list, dict]:
+        """Conservative shadow and receiver facts from one callable's source."""
+        import re
+
+        signature = str(info.get("signature") or "")
+        body = str(info.get("body") or "")
+        shadows = set()
+        receivers = dict(inherited_receivers or {})
+
+        arrow_left = signature.split("=>", 1)[0].strip() if "=>" in signature else ""
+        params_match = (re.search(r"\((.*?)\)", arrow_left, re.DOTALL)
+                        if arrow_left else re.search(r"\((.*?)\)", signature, re.DOTALL))
+        if params_match:
+            for raw_param in params_match.group(1).split(','):
+                param = raw_param.strip()
+                match = re.search(
+                    r"(?:public|private|protected|readonly|static|override|\s)*"
+                    r"(?:\.\.\.)?([A-Za-z_$][\w$]*)\s*[?!]?\s*(?::\s*([^=]+))?",
+                    param,
+                )
+                if not match:
+                    continue
+                name, raw_type = match.group(1), match.group(2)
+                shadows.add(name)
+                type_name = self._javascript_type_name(raw_type)
+                if type_name:
+                    receivers[name] = type_name
+        elif arrow_left:
+            single = re.match(r"\s*(?:async\s+)?([A-Za-z_$][\w$]*)\s*$", arrow_left)
+            if single:
+                shadows.add(single.group(1))
+
+        for match in re.finditer(
+                r"\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::\s*([^=;\n]+))?",
+                body):
+            shadows.add(match.group(1))
+            type_name = self._javascript_type_name(match.group(2))
+            if type_name:
+                receivers[match.group(1)] = type_name
+        for match in re.finditer(r"\b(?:const|let|var)\s*\{([^}]*)\}", body):
+            for item in match.group(1).split(','):
+                local = item.split(':', 1)[-1].strip().lstrip('...').strip()
+                if local and all(ch.isalnum() or ch in "_$" for ch in local):
+                    shadows.add(local)
+        for match in re.finditer(r"\bfunction\s+([A-Za-z_$][\w$]*)", body):
+            shadows.add(match.group(1))
+        for match in re.finditer(r"\bcatch\s*\(\s*([A-Za-z_$][\w$]*)", body):
+            shadows.add(match.group(1))
+        return sorted(shadows), receivers
+
+    def _annotate_javascript_context(self, functions: list, classes: list) -> None:
+        for function in functions:
+            if "javascript_shadowed_names" in function:
+                continue
+            shadows, receivers = self._javascript_callable_context(function)
+            function["javascript_shadowed_names"] = shadows
+            function["javascript_receiver_types"] = receivers
+        for cls in classes:
+            class_receivers = cls.pop("_javascript_receiver_types", {})
+            for method in cls.get("methods", []):
+                if "javascript_shadowed_names" in method:
+                    continue
+                shadows, receivers = self._javascript_callable_context(
+                    method, class_receivers)
+                method["javascript_shadowed_names"] = shadows
+                method["javascript_receiver_types"] = receivers
 
     def _extract_imports(self, root_node, code_bytes: bytes, lang_config: dict) -> tuple:
         imports = set()
@@ -1149,35 +1790,38 @@ class UniversalCodeParser:
             re.search(...) → \"re.search\",  db.client.search(...) → \"db.client.search\",
             bare search(...) → \"search\", <Header /> → \"Header\"
             """
-            if func_node.type in identifier_nodes:
+            if func_node.type in identifier_nodes or func_node.type in {
+                    "this", "super", "private_property_identifier"}:
                 return func_node.text.decode('utf-8', errors='ignore')
-            parts = []
-            n = func_node
-            while n.type in member_nodes:
-                names = [c for c in n.children if c.type in identifier_nodes]
-                if names:
-                    parts.append(names[-1].text.decode('utf-8', errors='ignore'))
-                obj = next(iter(n.children), None)
-                if obj and obj.type in member_nodes:
-                    n = obj
-                elif obj and obj.type in identifier_nodes:
-                    parts.append(obj.text.decode('utf-8', errors='ignore'))
-                    break
-                elif obj and lang_config.get("language") == "python" and obj.type in call_nodes:
-                    # Preserve the only receiver-call form we can resolve
-                    # statically without type inference: super().method().
-                    inner = obj.child_by_field_name("function")
-                    if inner is not None:
-                        receiver = _qualified_name(inner)
-                        if receiver == "super":
-                            parts.append(receiver)
-                    break
-                else:
-                    break
-            return '.'.join(reversed(parts))
+            if func_node.type in {
+                    "parenthesized_expression", "non_null_expression",
+                    "as_expression", "type_assertion"}:
+                expression = (func_node.child_by_field_name("expression")
+                              or next((c for c in func_node.children
+                                       if c.is_named and c.type not in {
+                                           "type_annotation", "type_identifier"}), None))
+                return _qualified_name(expression) if expression is not None else ""
+            if func_node.type in member_nodes:
+                obj = func_node.child_by_field_name("object")
+                prop = (func_node.child_by_field_name("property")
+                        or func_node.child_by_field_name("attribute"))
+                left = _qualified_name(obj) if obj is not None else ""
+                right = _qualified_name(prop) if prop is not None else ""
+                if obj is not None and not left:
+                    # Dynamic/factory receivers (make().run()) cannot be typed
+                    # from the call expression; never collapse them to "run".
+                    return ""
+                if left and right:
+                    return f"{left}.{right}"
+                return left or right
+            if func_node.type in call_nodes and lang_config.get("language") == "python":
+                inner = func_node.child_by_field_name("function")
+                return "super" if inner is not None and _qualified_name(inner) == "super" else ""
+            return ""
 
         scan_root = root_node
-        if lang_config.get("language") == "python":
+        language = str(lang_config.get("language", ""))
+        if language == "python" or language.startswith(("javascript", "typescript")):
             decorated = lang_config.get("decorated_definition", "decorated_definition")
             function_nodes = set(lang_config.get("function_nodes", []))
             method_nodes = set(lang_config.get("method_nodes", []))
@@ -1196,6 +1840,12 @@ class UniversalCodeParser:
             if definition.type in function_nodes | method_nodes:
                 body = definition.child_by_field_name("body")
                 if body is None:
+                    value = definition.child_by_field_name("value")
+                    if value is not None and value.type in set(
+                            lang_config.get("arrow_function_nodes", [])) | set(
+                            lang_config.get("function_expression_nodes", [])):
+                        body = value.child_by_field_name("body")
+                if body is None:
                     body_types = set(lang_config.get("body_nodes", []))
                     body = next(
                         (child for child in definition.children if child.type in body_types),
@@ -1203,6 +1853,14 @@ class UniversalCodeParser:
                     )
                 if body is not None:
                     scan_root = body
+            elif definition.type == "variable_declarator":
+                value = definition.child_by_field_name("value")
+                if value is not None and value.type in set(
+                        lang_config.get("arrow_function_nodes", [])) | set(
+                        lang_config.get("function_expression_nodes", [])):
+                    body = value.child_by_field_name("body")
+                    if body is not None:
+                        scan_root = body
 
         def walk(node):
             if node.type in call_nodes:
@@ -1214,18 +1872,20 @@ class UniversalCodeParser:
                 if func_node:
                     _add_call(_qualified_name(func_node))
             elif node.type in jsx_nodes:
-                tag_node = None
-                for n in node.children:
-                    if n.type in identifier_nodes:
-                        tag_node = n
-                        break
+                tag_node = next((n for n in node.children
+                                 if n.type in identifier_nodes + member_nodes), None)
                 if tag_node:
                     tag_name = _qualified_name(tag_node)
                     if tag_name and (tag_name[0].isupper() or '.' in tag_name):
                         _add_call(tag_name)
             for child in node.children:
-                if (lang_config.get("language") == "python"
-                        and child.type in prune_nodes):
+                if child.type in prune_nodes:
+                    callback_types = (set(lang_config.get("arrow_function_nodes", []))
+                                      | set(lang_config.get("function_expression_nodes", [])))
+                    if (child.type in callback_types
+                            and node.type in {"arguments", "argument_list", "return_statement"}):
+                        _add_call(
+                            f"callback_L{child.start_point[0] + 1}_C{child.start_point[1] + 1}")
                     continue
                 walk(child)
 

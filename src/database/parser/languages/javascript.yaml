@@ -24,11 +24,11 @@ node_types:
   class_body: class_body
   namespace_nodes: [internal_module, module]
   body_nodes: [statement_block, class_body, block]
-  name_identifiers: [identifier, property_identifier]
+  name_identifiers: [identifier, property_identifier, private_property_identifier]
   call_nodes: [call_expression]
   string_nodes: [string, template_string]
   decorator_nodes: [decorator]
-  identifier_nodes: [identifier, property_identifier]
+  identifier_nodes: [identifier, property_identifier, private_property_identifier]
   member_nodes: [member_expression]
   argument_list_nodes: [arguments]
   parameters_nodes: [formal_parameters]
@@ -50,6 +50,7 @@ node_types:
     - method_definition
     - field_definition
     - arrow_function
+    - function_expression
     - class_declaration
   export_statement_nodes: [export_statement]
   export_default_statement_nodes: [export_default_statement]

@@ -16,6 +16,7 @@ from src.database.parser.language_adapter import (
     get_adapter,
     get_lang_config,
     load_language_config,
+    compute_index_fingerprint,
 )
 from src.database.parser.ast_parser import UniversalCodeParser
 
@@ -84,6 +85,12 @@ class TestLanguageRegistry:
         assert cfg["call_nodes"] == ["call"]
         assert cfg["http_calls"] is True
         assert cfg["framework_detection"] is True
+
+    def test_fingerprint_changes_with_extraction_config(self, monkeypatch):
+        before = compute_index_fingerprint()
+        adapter = LANGUAGE_ADAPTERS[".py"]
+        monkeypatch.setitem(adapter.config, "function_nodes", ["different_definition"])
+        assert compute_index_fingerprint() != before
 
 
 class TestLanguageAdapter:

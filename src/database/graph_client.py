@@ -19,6 +19,8 @@ _ESM_IMPORT_RE = re.compile(
 
 logger = logging.getLogger(__name__)
 
+JAVASCRIPT_EXTENSIONS = ('.js', '.jsx', '.ts', '.tsx')
+
 try:
     import engramdb
 except ImportError:
@@ -62,7 +64,6 @@ class EngramClient:
         self._hydrate_extra_meta()
 
         logger.info(f"EngramDB Rust engine initialized for: {self.workspace_path}")
-        self.clean_stale_files()
 
     def _hydrate_extra_meta(self) -> None:
         """Restore Python post-processing metadata from Rust snapshots."""
@@ -121,15 +122,20 @@ class EngramClient:
         - calls: list of strings (function names called by this node)
         - django_relations: list of dicts (for model relations)
         """
-        if _extra:
-            self._extra_meta[node_id] = _extra
+        extra = dict(_extra or {})
+        if node_type == "Function" and str(file_path).lower().endswith(JAVASCRIPT_EXTENSIONS):
+            if calls is not None:
+                extra["javascript_raw_calls"] = list(calls)
+            calls = None
+        if extra:
+            self._extra_meta[node_id] = extra
         
         lines_start = lines.get('start') if lines else None
         lines_end = lines.get('end') if lines else None
         
         import json
         django_json = json.dumps(django_relations) if django_relations else None
-        extra_json_str = json.dumps(_extra) if _extra else None
+        extra_json_str = json.dumps(extra) if extra else None
 
         self.engine.add_node(
             node_id=node_id,
@@ -173,6 +179,9 @@ class EngramClient:
         Resolves multiple call names to node IDs and connects them in the graph.
         Uses the high-performance Rust O(1) name index.
         """
+        meta = self.engine.get_node_meta(caller_id) or {}
+        if str(meta.get("file_path", "")).lower().endswith(JAVASCRIPT_EXTENSIONS):
+            return []
         return self.engine.resolve_and_connect_calls(caller_id, call_names)
 
     def resolve_and_connect_django(self, node_id: str, django_relations: list):
@@ -190,10 +199,15 @@ class EngramClient:
         """Incrementally rebuild the CSR graph and save snapshot."""
         self.engine.rebuild()
 
+    def save(self):
+        """Synchronously persist the current graph generation."""
+        self.engine.save()
+
     def _index_meta_path(self) -> str:
         return os.path.join(self.workspace_path, INDEX_META_FILENAME)
 
-    def write_index_meta(self, node_count: int = None, file_manifest: dict = None) -> None:
+    def write_index_meta(self, node_count: int = None, file_manifest: dict = None,
+                         dirty: bool = False) -> None:
         """Record the indexing configuration that produced the current graph.
 
         Written after a full scan/rebuild so a later start can detect that the
@@ -210,6 +224,7 @@ class EngramClient:
             "indexed_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
             "supported_extensions": list(SUPPORTED_EXTENSIONS),
             "node_count": node_count if node_count is not None else len(self.get_all_metadata()),
+            "dirty": dirty,
         }
         if file_manifest is not None:
             meta["file_manifest"] = file_manifest
@@ -230,7 +245,7 @@ class EngramClient:
             return None
 
     def is_index_stale(self) -> bool:
-        """True when the persisted graph was built under a different indexing config.
+        """True when the graph is dirty or built under another indexing config.
 
         A missing marker (never indexed) is treated as fresh — a scan is what
         creates the marker, and until then there is nothing stale to answer from.
@@ -242,13 +257,16 @@ class EngramClient:
                 stored = json.load(f)
         except (OSError, ValueError):
             return False
-        return stored.get("fingerprint") != compute_index_fingerprint()
+        if not isinstance(stored, dict):
+            return True
+        return bool(stored.get("dirty")) or stored.get("fingerprint") != compute_index_fingerprint()
 
     def invalidate_file(self, file_path: str):
         """Remove all nodes and edges belonging to a file from the Rust engine."""
         # Clean up Python-level extra metadata for this file
         prefix = file_path.replace('\\', '/')
-        keys_to_remove = [k for k in self._extra_meta if k.startswith(prefix)]
+        keys_to_remove = [k for k in self._extra_meta
+                          if k == prefix or k.startswith(prefix + ":")]
         for k in keys_to_remove:
             del self._extra_meta[k]
         return self.engine.invalidate_file(file_path)
@@ -259,59 +277,45 @@ class EngramClient:
         max_depth: 0 = unlimited, 1 = direct callers only, etc.
         Returns list of readable node_ids affected.
         """
-        try:
-            return self.engine.blast_radius(node_id, max_depth)
-        except Exception as e:
-            logger.debug(f"Blast radius failed for {node_id}: {e}")
-            return []
+        return self.engine.blast_radius(node_id, max_depth)
 
     def get_recursive_callees(self, node_id: str, max_depth: int = 0) -> list:
         """
         Run BFS to find all recursive callees in Rust.
         max_depth: 0 = unlimited, 1 = direct callees only, etc.
         """
-        try:
-            return self.engine.get_recursive_callees(node_id, max_depth)
-        except Exception as e:
-            logger.debug(f"Recursive callees failed for {node_id}: {e}")
-            return []
+        return self.engine.get_recursive_callees(node_id, max_depth)
 
     def get_callers(self, node_id: str) -> list:
         """Get direct callers of a node from the Rust graph (deduplicated, order-preserving)."""
-        try:
-            return _dedupe_preserve_order(self.engine.get_callers(node_id))
-        except Exception as e:
-            logger.debug(f"get_callers failed for {node_id}: {e}")
-            return []
+        return _dedupe_preserve_order(self.engine.get_callers(node_id))
 
     def get_callees(self, node_id: str) -> list:
         """Get direct callees of a node from the Rust graph (deduplicated, order-preserving)."""
-        try:
-            return _dedupe_preserve_order(self.engine.get_callees(node_id))
-        except Exception as e:
-            logger.debug(f"get_callees failed for {node_id}: {e}")
-            return []
+        return _dedupe_preserve_order(self.engine.get_callees(node_id))
 
     def get_dependents(self, node_id: str) -> list:
         """Get direct incoming relationships of every edge type."""
-        try:
-            return _dedupe_preserve_order(self.engine.get_dependents(node_id))
-        except Exception as e:
-            logger.debug(f"get_dependents failed for {node_id}: {e}")
-            return []
+        return _dedupe_preserve_order(self.engine.get_dependents(node_id))
 
     def get_dependencies(self, node_id: str) -> list:
         """Get direct outgoing relationships of every edge type."""
-        try:
-            return _dedupe_preserve_order(self.engine.get_dependencies(node_id))
-        except Exception as e:
-            logger.debug(f"get_dependencies failed for {node_id}: {e}")
-            return []
+        return _dedupe_preserve_order(self.engine.get_dependencies(node_id))
 
     def repopulate_edges(self):
         """Re-resolve all call/Django edges by iterating stored metadata.
         Call after all files are indexed to pick up cross-file edges.
         """
+        # Legacy snapshots may still store JS/TS calls natively, which makes
+        # Rust use its global name fan-out resolver. Quarantine those calls in
+        # extra metadata before Rust clears/rebuilds resolved-call edges.
+        for node_id, meta in list(self.engine.get_all_metadata().items()):
+            if (meta.get("type") == "Function"
+                    and str(meta.get("file_path", "")).lower().endswith(JAVASCRIPT_EXTENSIONS)
+                    and meta.get("calls")):
+                extra = dict(self._extra_meta.get(node_id, {}))
+                extra.setdefault("javascript_raw_calls", list(meta["calls"]))
+                self._upsert_from_meta(node_id, meta, extra, calls=meta["calls"])
         self.engine.repopulate_edges()
 
     def search(self, keyword: str) -> list:
@@ -336,6 +340,8 @@ class EngramClient:
         extra = self._extra_meta.get(node_id, {})
         if extra:
             meta.update(extra)
+        if "javascript_raw_calls" in meta:
+            meta["calls"] = list(meta["javascript_raw_calls"])
         return meta
 
     def get_stats(self) -> dict:
@@ -367,6 +373,9 @@ class EngramClient:
                 all_meta[nid].update(extra)
             else:
                 all_meta[nid] = dict(extra)
+        for meta in all_meta.values():
+            if "javascript_raw_calls" in meta:
+                meta["calls"] = list(meta["javascript_raw_calls"])
         return all_meta
 
     def add_to_extra_meta(self, node_id: str, key: str, value):
@@ -375,20 +384,125 @@ class EngramClient:
             self._extra_meta[node_id] = {}
         self._extra_meta[node_id][key] = value
 
+    def persist_extra_metadata(self) -> None:
+        """Write Python-derived metadata back into Rust before snapshotting.
+
+        Cross-file passes add values such as ``full_url`` and
+        ``api_dependencies`` after nodes were inserted. Re-upserting the same
+        node IDs persists those values in ``extra_json`` without changing graph
+        identity or typed edges.
+        """
+        for node_id, extra in list(self._extra_meta.items()):
+            meta = self.engine.get_node_meta(node_id)
+            if not meta:
+                continue
+            self._upsert_from_meta(node_id, meta, dict(extra), calls=meta.get("calls"))
+
+    def _upsert_from_meta(self, node_id: str, meta: dict, extra: dict,
+                          calls=None) -> None:
+        import json
+
+        django_relations = None
+        raw_django = meta.get("django_relations_json")
+        if raw_django:
+            try:
+                django_relations = json.loads(raw_django)
+            except (TypeError, ValueError):
+                pass
+        self.add_node(
+            node_id,
+            meta.get("type", "Unknown"),
+            meta.get("name", ""),
+            meta.get("file_path", ""),
+            signature=meta.get("signature"),
+            docstring=meta.get("docstring"),
+            lines=meta.get("lines"),
+            returns=meta.get("returns"),
+            calls=calls,
+            django_relations=django_relations,
+            is_async=meta.get("is_async"),
+            is_generator=meta.get("is_generator"),
+            param_count=meta.get("param_count"),
+            is_exported=meta.get("is_exported"),
+            blast_radius_score=meta.get("blast_radius_score"),
+            _extra=extra,
+        )
+
     def _build_name_index(self, meta_type: str) -> dict:
-        """Build O(1) name-to-node_id index for a given type."""
+        """Build a name-to-node_ids index without discarding duplicates."""
         idx = {}
         for nid, meta in self.engine.get_all_metadata().items():
             if meta.get('type') == meta_type:
-                idx[meta.get('name')] = nid
+                idx.setdefault(meta.get('name'), []).append(nid)
         return idx
 
+    def _pick_named_target(self, name: str, source_file: str,
+                           *indexes: dict[str, list[str]]) -> str | None:
+        """Resolve a route/model target only when context yields one winner."""
+        parts = [part for part in str(name or "").split(".") if part]
+        binding = None
+        file_extra = self._extra_meta.get(source_file, {})
+        bindings = file_extra.get("python_import_bindings") or {}
+        alias = parts[0] if parts else str(name or "")
+        if isinstance(bindings, dict):
+            for scope in bindings.values():
+                if isinstance(scope, dict) and isinstance(scope.get(alias), dict):
+                    binding = scope[alias]
+                    break
+
+        if len(parts) > 1 and parts[-1] == "as_view":
+            names = [name, parts[0], parts[-1]]
+        else:
+            names = [name, parts[-1] if parts else "",
+                     parts[0] if len(parts) > 1 else ""]
+        if binding and len(parts) == 1 and binding.get("symbol"):
+            names.insert(1, binding["symbol"])
+        candidates = []
+        for candidate_name in dict.fromkeys(names):
+            for index in indexes:
+                candidates.extend(index.get(candidate_name, ()))
+            if candidates:
+                break
+        candidates = list(dict.fromkeys(candidates))
+        if len(candidates) == 1:
+            return candidates[0]
+        if not candidates:
+            return None
+
+        source_dir = os.path.dirname(source_file.replace('\\', '/'))
+        module_hint = parts[0] if len(parts) > 1 else ""
+        expected_module = ""
+        if binding:
+            expected_module = str(binding.get("module") or "").replace('.', '/').strip('/')
+            if len(parts) > 1 and binding.get("kind") == "from" and binding.get("symbol"):
+                expected_module = f"{expected_module}/{binding['symbol']}".strip('/')
+        scored = []
+        for node_id in candidates:
+            meta = self.engine.get_node_meta(node_id) or {}
+            candidate_file = str(meta.get("file_path", "")).replace('\\', '/')
+            score = 0
+            candidate_module = os.path.splitext(candidate_file)[0]
+            if expected_module and (candidate_module == expected_module
+                                    or candidate_module.endswith('/' + expected_module)):
+                score += 10
+            if os.path.dirname(candidate_file) == source_dir:
+                score += 4
+            if module_hint and os.path.splitext(os.path.basename(candidate_file))[0] == module_hint:
+                score += 3
+            scored.append((score, node_id))
+        scored.sort(reverse=True)
+        if scored[0][0] <= 0 or (len(scored) > 1 and scored[0][0] == scored[1][0]):
+            return None
+        return scored[0][1]
+
     def resolve_import_edges(self):
-        """Rebuild cross-file import dependencies independent of scan order.
+        """Rebuild persisted Python import edges independent of scan order.
 
         Importers are unchanged when an imported file is edited, so target-file
         invalidation can remove their incoming structural edges. The persisted
-        Python binding map lets this pass restore those relationships globally.
+        binding map lets this pass restore those relationships globally. JS/TS
+        import relationships are derived on demand from structured bindings so
+        ambiguity changes cannot leave stale structural edges.
         """
         all_meta = self.get_all_metadata()
         file_paths = {
@@ -448,6 +562,21 @@ class EngramClient:
         if edges:
             logger.info(f"Resolved {edges} cross-file import edges")
 
+    def resolve_javascript_calls(self):
+        """Resolve JS/TS calls from lexical/import/type context.
+
+        Edges are generated (globally replaceable), so import/export changes or
+        new ambiguity cannot leave stale executable relationships behind.
+        """
+        from src.database.javascript_resolver import JavaScriptResolver
+
+        edges = JavaScriptResolver(self.get_all_metadata()).executable_edges()
+        for caller, target in edges:
+            self.engine.add_generated_edge(caller, target)
+        if edges:
+            logger.info("Resolved %d contextual JavaScript/TypeScript call edges",
+                        len(edges))
+
     def resolve_url_patterns(self):
         """Second pass: link URL patterns to their view function nodes.
         
@@ -457,25 +586,26 @@ class EngramClient:
         fn_idx = self._build_name_index('Function')
         cls_idx = self._build_name_index('Class')
 
-        url_map = {}
-        for nid, extra in list(self._extra_meta.items()):
+        all_meta = self.get_all_metadata()
+        for nid, extra in self._extra_meta.items():
+            if (all_meta.get(nid) or {}).get("type") in ("Function", "Class"):
+                extra.pop("url_patterns", None)
+
+        linked = 0
+        for source_id, extra in list(self._extra_meta.items()):
+            source_meta = all_meta.get(source_id, {})
+            if source_meta.get("type") != "File":
+                continue
             patterns = extra.get('url_patterns', [])
             if patterns:
                 for p in patterns:
                     vname = p.get('view_name', '')
-                    if vname:
-                        url_map.setdefault(vname, []).append(p)
-
-        linked = 0
-        for view_name, patterns in url_map.items():
-            target_id = fn_idx.get(view_name) or cls_idx.get(view_name)
-            if target_id:
-                existing = self._extra_meta.get(target_id, {})
-                if 'url_patterns' not in existing:
-                    existing['url_patterns'] = []
-                existing['url_patterns'].extend(patterns)
-                self._extra_meta[target_id] = existing
-                linked += 1
+                    target_id = self._pick_named_target(
+                        vname, source_meta.get("file_path", source_id), fn_idx, cls_idx)
+                    if target_id:
+                        existing = self._extra_meta.setdefault(target_id, {})
+                        existing.setdefault('url_patterns', []).append(p)
+                        linked += 1
 
         # ── Also connect Route nodes → View functions ──
         # Route nodes store view_name in extra meta; resolve bare name to node ID
@@ -487,14 +617,11 @@ class EngramClient:
             view_name = extra.get('view_name', '')
             if not view_name:
                 continue
-            # Try full dotted name first, then bare last segment
-            candidates = [view_name, view_name.rsplit('.', 1)[-1]]
-            for candidate in candidates:
-                target = fn_idx.get(candidate) or cls_idx.get(candidate)
-                if target and target != nid:
-                    self.engine.add_generated_edge(nid, target)
-                    route_edges += 1
-                    break
+            target = self._pick_named_target(
+                view_name, meta.get("file_path", ""), fn_idx, cls_idx)
+            if target and target != nid:
+                self.engine.add_generated_edge(nid, target)
+                route_edges += 1
 
         if route_edges:
             logger.info(f"Created {route_edges} Route→View edges")
@@ -511,6 +638,12 @@ class EngramClient:
         Supports both direct variable-name matching and import-alias resolution.
         """
         all_meta = self.get_all_metadata()
+
+        # ``full_url`` is derived. Clear the previous generation so changing or
+        # removing a mount never compounds prefixes or leaves stale metadata.
+        for route_id, extra in self._extra_meta.items():
+            if (all_meta.get(route_id) or {}).get('type') == 'Route':
+                extra.pop('full_url', None)
 
         # Step 1: Collect mount entries (add_router calls) from file extra_meta
         # mount_map: handler_var -> [(mount_url, mount_file, parent_var)]
@@ -663,7 +796,7 @@ class EngramClient:
                 continue
 
             source_var = extra.get('source_var', '')
-            route_url = extra.get('url', '')
+            route_url = extra.get('declared_url', extra.get('url', ''))
             route_file = meta.get('file_path', '')
 
             matched_mounts = []
@@ -722,18 +855,7 @@ class EngramClient:
 
             if full_url != route_url:
                 self._extra_meta[route_id]['full_url'] = full_url
-                self._extra_meta[route_id]['url'] = full_url
                 updates += 1
-
-                view_name = extra.get('view_name', '')
-                if view_name and route_file:
-                    func_id = f"{route_file}:{view_name}"
-                    if func_id in self._extra_meta:
-                        f_extra = self._extra_meta[func_id]
-                        if 'api_endpoint' in f_extra:
-                            f_extra['api_endpoint']['url'] = full_url
-                        if 'url_patterns' in f_extra and f_extra['url_patterns']:
-                            f_extra['url_patterns'][0]['url'] = full_url
 
         if updates:
             logger.info(
@@ -745,7 +867,7 @@ class EngramClient:
 
         A middleware registered on a router (e.g. app.use(auth_mw)) wraps all
         routes that share the same source_var.  Creates Middleware -[APPLIES_TO]-> Route edges
-        so FLOW FOR 'route:X' can trace back through the middleware chain.
+        so structural impact can cross the middleware/route boundary.
         """
         all_meta = self.get_all_metadata()
 
@@ -810,7 +932,8 @@ class EngramClient:
         """
         import re
         
-        def normalize_url(url: str, file_path: str = None) -> str:
+        def normalize_url(url: str, file_path: str = None,
+                          numeric_params: bool = False) -> str:
             url = url.strip().rstrip('/')
             if not url.startswith('/'):
                 url = '/' + url
@@ -826,6 +949,10 @@ class EngramClient:
             url = re.sub(r'<[^>]+>', '{id}', url)
             url = re.sub(r':[a-zA-Z0-9_]+', '{id}', url)
             url = re.sub(r'\{[^}]*\}', '{id}', url)
+            if numeric_params:
+                # Call-side literals may represent dynamic path parameters;
+                # static backend routes such as /reports/2024 stay distinct.
+                url = re.sub(r'/\d+(?=/|$)', '/{id}', url)
                 
             # If a backend file path is provided, we can prepend the module prefix
             if file_path and "src/modules/" in file_path:
@@ -839,17 +966,20 @@ class EngramClient:
             return url
         
         # ── Step 1: Index Route nodes (precise URL-based matching) ──
-        route_index = {}  # {normalized_url: {method: route_node_id}}
+        route_index = {}  # {normalized_url: {method: [route_node_id, ...]}}
         for node_id, meta in self.engine.get_all_metadata().items():
             meta_dict = dict(meta.items()) if hasattr(meta, 'items') else meta
             if meta_dict.get('type') != 'Route':
                 continue
             extra = self._extra_meta.get(node_id, {})
-            url = extra.get('url', '')
+            url = extra.get('full_url') or extra.get('url', '')
             if not url:
                 continue
             norm_url = normalize_url(url)
-            route_index.setdefault(norm_url, {})['GET'] = node_id
+            methods = extra.get('methods') or ['GET']
+            for method in methods:
+                route_index.setdefault(norm_url, {}).setdefault(
+                    str(method).upper(), []).append(node_id)
         
         # ── Step 2: Index backend endpoint function/class nodes ──
         endpoint_nodes = {}  # node_id -> {methods, name, file}
@@ -893,6 +1023,9 @@ class EngramClient:
                     'file': file_path,
                 }
         
+        for extra in self._extra_meta.values():
+            extra.pop("api_dependencies", None)
+
         if not route_index and not endpoint_nodes and not fn_name_index:
             logger.info("No API endpoints or routes found to resolve")
             return
@@ -903,7 +1036,7 @@ class EngramClient:
             for url in info['urls']:
                 url_endpoint_index.setdefault(url, {})
                 for m in info['methods']:
-                    url_endpoint_index[url][m.upper()] = nid
+                    url_endpoint_index[url].setdefault(m.upper(), []).append(nid)
         
         # ── Step 4: Find HTTP callers and match to Route→Endpoint ──
         edges_added = 0
@@ -928,30 +1061,42 @@ class EngramClient:
                     continue
                 
                 norm_call_url = normalize_url(call_url)
-                
+                dynamic_call_url = normalize_url(call_url, numeric_params=True)
+
+                def url_score(candidate_url: str) -> int | None:
+                    if norm_call_url == candidate_url:
+                        return 100
+                    if '{id}' in candidate_url and dynamic_call_url == candidate_url:
+                        return 95
+                    call_parts = [p for p in norm_call_url.split('/') if p]
+                    candidate_parts = [p for p in candidate_url.split('/') if p]
+                    if candidate_parts and call_parts[:len(candidate_parts)] == candidate_parts:
+                        return 50
+                    if call_parts and candidate_parts[:len(call_parts)] == call_parts:
+                        return 40
+                    if candidate_parts and call_parts[-len(candidate_parts):] == candidate_parts:
+                        return 35
+                    if call_parts and candidate_parts[-len(call_parts):] == call_parts:
+                        return 30
+                    return None
+
                 best_match = None
                 best_score = -1
+                url_candidate_seen = False
                 
                 # ── Tier 1: Match against Route nodes (precise URL) ──
                 if route_index:
                     for route_url, method_map in route_index.items():
-                        target_id = method_map.get(call_method) or method_map.get('GET')
-                        if not target_id:
+                        score = url_score(route_url)
+                        if score is None:
                             continue
-                        if norm_call_url == route_url:
-                            score = 100
-                        elif norm_call_url.startswith(route_url) and len(route_url) > 5:
-                            score = 50
-                        elif route_url.startswith(norm_call_url) and len(norm_call_url) > 5:
-                            score = 40
-                        elif norm_call_url.endswith(route_url) and len(route_url) > 3:
-                            score = 35
-                        elif route_url.endswith(norm_call_url) and len(norm_call_url) > 3:
-                            score = 30
-                        elif norm_call_url in route_url or route_url in norm_call_url:
-                            score = 10
-                        else:
+                        url_candidate_seen = True
+                        targets = method_map.get(call_method, [])
+                        if not targets and call_method == 'HEAD':
+                            targets = method_map.get('GET', [])
+                        if len(targets) != 1:
                             continue
+                        target_id = targets[0]
                         if score > best_score:
                             best_score = score
                             best_match = (target_id, route_url, 'route_url')
@@ -959,29 +1104,25 @@ class EngramClient:
                 # ── Tier 2: URL-based matching against endpoint nodes ──
                 if url_endpoint_index:
                     for ep_url, method_map in url_endpoint_index.items():
-                        target_id = method_map.get(call_method) or method_map.get('GET') or next(iter(method_map.values()), None)
-                        if not target_id:
+                        score = url_score(ep_url)
+                        if score is None:
                             continue
-                        if norm_call_url == ep_url:
-                            score = 100
-                        elif norm_call_url.startswith(ep_url) and len(ep_url) > 5:
-                            score = 50
-                        elif ep_url.startswith(norm_call_url) and len(norm_call_url) > 5:
-                            score = 40
-                        elif norm_call_url.endswith(ep_url) and len(ep_url) > 3:
-                            score = 35
-                        elif ep_url.endswith(norm_call_url) and len(norm_call_url) > 3:
-                            score = 30
-                        elif norm_call_url in ep_url or ep_url in norm_call_url:
-                            score = 10
-                        else:
+                        url_candidate_seen = True
+                        targets = method_map.get(call_method, [])
+                        if not targets and call_method == 'HEAD':
+                            targets = method_map.get('GET', [])
+                        if len(targets) != 1:
                             continue
+                        target_id = targets[0]
                         if score > best_score:
                             best_score = score
                             best_match = (target_id, ep_url, 'endpoint_url')
                 
                 # ── Tier 3: Name-based matching from URL path segments ──
-                raw_segments = [s for s in norm_call_url.split('/') if s and s not in ('api', 'v1', 'v2', 'v3')]
+                # A name guess must never override a URL match (Tier 1/2): it
+                # is only a fallback when the URL matched nothing at all.
+                raw_segments = [] if best_match is not None or url_candidate_seen else \
+                    [s for s in norm_call_url.split('/') if s and s not in ('api', 'v1', 'v2', 'v3')]
                 segments = []
                 for s in raw_segments:
                     clean = re.sub(r'\{[^}]*\}', '', s)
@@ -1087,8 +1228,13 @@ class EngramClient:
                     if node_type_map.get(ep_id) == 'Class':
                         score -= 40
                     name_candidates.append((ep_id, score))
-                for target_id, score in name_candidates:
-                    if score >= 55 and score > best_score:
+                eligible = sorted(
+                    ((score, target_id) for target_id, score in name_candidates if score >= 55),
+                    reverse=True,
+                )
+                if eligible and (len(eligible) == 1 or eligible[0][0] > eligible[1][0]):
+                    score, target_id = eligible[0]
+                    if score > best_score:
                         best_score = score
                         best_match = (target_id, call_url, 'name_fallback')
                 
@@ -1131,17 +1277,13 @@ class EngramClient:
                 target_name = rel.get('related_model', '')
                 if not target_name:
                     continue
-                target_id = class_idx.get(target_name)
+                source_meta = self.engine.get_node_meta(node_id) or {}
+                target_id = self._pick_named_target(
+                    target_name, source_meta.get("file_path", ""), class_idx)
                 if target_id and target_id != node_id:
                     self.engine.add_structural_edge(target_id, node_id)
                     edges_added += 1
         logger.info(f"Resolved {edges_added} Django ORM edges")
-
-    def query(self, raw: str) -> dict:
-        """Execute a DSL query string against the graph database."""
-        # pyrefly: ignore [missing-import]
-        from src.query import query as _query_engine
-        return _query_engine(self, raw)
 
     def close(self):
         """Explicitly save and close the engine."""

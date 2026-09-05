@@ -1,173 +1,178 @@
-# 🦠 Cordyceps Search
+# Cordyceps
 
-**Cordyceps Search** is a high-performance codebase semantic search, dependency tracking, and AST-aware refactoring engine. It is packaged as an MCP (Model Context Protocol) server designed to empower developer agents with the structural understanding and refactoring capabilities of a mature IDE.
+**Cordyceps** is an MCP server that gives coding agents *structural* understanding of a
+codebase: what is where, which definition a name refers to, and what else depends on it.
 
-By combining the blazing speed of a Rust-native CSR (Compressed Sparse Row) graph engine with the precision of `tree-sitter` AST parsers, Cordyceps Search enables instant semantic discovery, caller/callee blast radius auditing, and cross-file refactoring.
-
----
-
-## 🚀 Key Features
-
-* **Zero-Copy CSR Graph Engine**: Backed by a high-performance Rust core (`engramdb`) for microsecond-level graph traversals and memory efficiency.
-* **Multi-Language AST Parsing**: Full structural extraction (classes, methods, functions, calls, returns, docstrings) for Python, JavaScript, JSX, TypeScript, and TSX using `tree-sitter`.
-* **Cross-Boundary API Tracking**: Traces connections between frontend HTTP requests (`fetch`, `axios`) and backend endpoints (Django, Flask, FastAPI).
-* **AST-Aware Safe Refactoring**: Supports syntax-validated node edits, structured node creation, and AST-aware renaming with cross-file reference propagation.
-* **Watchdog-Driven Real-Time Sync**: Automatically detects file additions, modifications, and deletions in the workspace, debouncing events, and keeping the code graph dynamically updated.
-* **Thread-Safe RW Concurrency**: Protected by a read-write lock mechanism to ensure safe multi-threaded reads while keeping the unsendable Rust engine execution serial.
+Agents already have `read`, `grep` and `glob`. What they lack is the picture an IDE
+builds in the background: the definition tree of every file, canonical identities for
+symbols with the same name, and a call graph to answer "what breaks if I change this".
+Cordyceps indexes the workspace with `tree-sitter`, stores the result in a Rust CSR
+graph (`engramedb`), keeps it in sync with a file watcher, and exposes exactly three tools.
 
 ---
 
-## Supported Languages
+## Tools
 
-Indexed via `tree-sitter`. Adding a language = drop a YAML config in `src/database/parser/languages/` — no code changes required. Other files are ingested as body-only `File` nodes (searchable, no AST).
+All tools answer in YAML. Every response carries `meta.index_stale`, `meta.graph_built`
+and, when relevant, `meta.warnings`, so an agent can tell a trustworthy answer from a
+partial one.
 
-| Language | Extensions | Parser | Notes |
-|---|---|---|---|
-| Python | `.py` | `tree_sitter_python` | Full contextual resolution — imports/aliases, lexical scopes, receiver types, `self`/`cls`/`super()` MRO, shadowed locals, union annotations |
-| JavaScript | `.js` | `tree_sitter_javascript` | Functions, classes, calls, imports/exports, routes, HTTP calls |
-| JavaScript (JSX) | `.jsx` | `tree_sitter_javascript` | Same as JS + JSX components |
-| TypeScript | `.ts` | `tree_sitter_typescript` | Types, interfaces, generics, inheritance |
-| TypeScript (TSX) | `.tsx` | `tree_sitter_typescript` | Same as TS + JSX/TSX components |
+### `code_map(path=".", depth=1)`
 
-Body-only file nodes (no AST, searchable as files): `.json`, `.md`, `.html`, `.css`, `.yml`, `.yaml`, `.toml`, `.txt`, `.sql`.
+Outline of a directory or a file.
 
-Excluded from indexing: `node_modules`, `venv`, `.venv`, `__pycache__`, `target`, `dist`, `build`, `migrations`, `.git`, `.idea`, `.vscode`, `coverage`, `.next`, `.nuxt`, `fixtures`, `test_fixtures`, `test_data` and any dotfile dirs. Extend via `CORDYCEPS_EXCLUDE` env var (comma-separated).
+* **Directory**: immediate sub-folders (with file/symbol counts), immediate files (line
+  count, symbol counts by kind, top-level definition names). `depth` (1–4) expands nested
+  folders.
+* **File**: the definition tree — classes with their methods, functions with nested
+  definitions, routes, declarations — each with line range and signature, plus imports.
+
+```yaml
+symbols:
+- name: CodeStructure
+  kind: Class
+  lines: 54-505
+  members:
+  - name: map
+    kind: Function
+    lines: 76-89
+    signature: 'def map(self, path: str = ".", depth: int = 1) -> dict'
+```
+
+### `lookup_symbol(symbol, path=None)`
+
+Where a symbol is defined and what it is directly connected to. `symbol` may be a bare
+name (`create_sale`), a qualified name (`SalesAPI.create_sale`), `<file>:<name>`
+(`api.py:create_sale`), a full node id, or a file path. `path` restricts matches to a folder.
+
+* `status: resolved` → `symbol` (id, kind, file, lines, signature, container, docstring,
+  decorators, base classes) and `relationships` (callers, callees, members, unresolved
+  external calls; for files: imports, imported_by, defines).
+* `status: ambiguous` → `candidates`. The server **never** picks one of several matches.
+* `status: not_found` → close-match `suggestions`.
+
+### `impact(symbol, depth=2, direction="callers")`
+
+Blast radius. Follows executable edges only (calls and framework/HTTP links — never
+imports or containment), grouped by file with the hop distance of every entry.
+
+```yaml
+meta: {direct: 2, total: 3, files: 2, truncated: false, more_beyond_depth: false}
+direct_callers: [src/structure/resolver.py:resolve_symbol, ...]
+affected:
+  src/structure/resolver.py:
+  - resolve_symbol [Function] L40-70 depth=1
+  src/structure/service.py:
+  - CodeStructure.lookup [Function] L92-112 depth=2
+```
+
+`direction="callees"` answers the opposite question ("what does this rely on").
+`meta.more_beyond_depth` and `meta.truncated` say explicitly when the picture is incomplete.
 
 ---
 
-## 🏗️ Architecture
+## Supported languages
 
-![alt text](image.png)
+| Language | Extensions | Call resolution |
+|---|---|---|
+| Python | `.py` | Contextual: imports/aliases, lexical scope, `self`/`cls`/`super()`, annotated receivers. Ambiguous calls stay unresolved rather than guessed. |
+| JavaScript / JSX | `.js`, `.jsx` | Contextual: ESM/CommonJS imports and aliases, exports/re-exports, lexical scope, shadowing, `this`/`super()`, JSX default imports. No global name fallback. |
+| TypeScript / TSX | `.ts`, `.tsx` | Same as JavaScript, plus typed parameters/fields and direct `new Type()` receiver inference. |
 
-* **`main.py`**: The stdio transport server entrypoint using `FastMCP`.
-* **`src/database/`**: Core client interface wrapping the Rust engine, managing Django ORM/URL resolutions, and enforcing read-write thread safety.
-* **`src/database/parser/`**: Language-specific grammar configurations and the `UniversalCodeParser` that walks tree-sitter ASTs.
-* **`src/watcher/`**: File system events monitor built on `watchdog` to coordinate incremental rebuilds.
-* **`src/services/`**: Logical business operations supporting graph queries, fuzzy searches, and AST modification edits.
+JS/TS resolution is deliberately conservative: dynamic factory receivers, runtime
+monkey-patching, ambiguous modules/exports, and unconfigured package aliases remain
+unresolved instead of falling back to a same-name symbol elsewhere in the repository.
+
+Web-framework linking (Django URLconf, Flask/FastAPI/Ninja decorators, Express routers,
+frontend `fetch`/`axios` calls → backend routes) produces `Route`/`Middleware` nodes and
+edges that make `impact` cross the frontend/backend boundary. These edges are heuristic
+and are flagged as such.
+
+Other files (`.json`, `.md`, `.html`, `.css`, `.yml`, `.yaml`, `.toml`, `.txt`, `.sql`) are
+indexed as `File` nodes so they appear in `code_map`.
+
+The language registry is config-driven (`src/database/parser/languages/*.yaml`), but a new
+language still needs a grammar dependency, extraction rules tested against that language's
+AST shapes, and fixtures for its symbol kinds. Trustworthy call resolution needs a
+per-language resolver; unsupported dynamic receivers remain unresolved rather than guessed.
+
+Excluded directories: `node_modules`, `venv`/`.venv`, `__pycache__`, `target`, `dist`,
+`build`, `migrations`, `.git`, `.idea`, `.vscode`, `coverage`, `.next`, `.nuxt`, fixture
+directories, and any dot-directory. Extend with `CORDYCEPS_EXCLUDE=dir1,dir2`.
 
 ---
 
-## Getting Started
+## Architecture
 
-### Prerequisites
+```
+main.py                    MCP entrypoint: 3 tools + serve()
+src/structure/             the tools' logic (pure functions over the graph)
+  index_view.py            request-scoped snapshot of the index + node-id rules
+  resolver.py              name / qualified / <file>:<name> -> canonical id (or candidates)
+  records.py               allow-listed projections; never leaks source bodies
+  service.py               CodeStructure.map / lookup / impact
+src/indexing/workspace.py  WorkspaceIndex: scan, warm start, incremental sync, edge pipeline
+src/database/              EngramClient over the Rust engine; cross-file resolution passes
+  javascript_resolver.py   contextual JS/TS calls (imports, scope, classes, receiver types)
+src/database/parser/       UniversalCodeParser (tree-sitter) + languages/*.yaml
+src/watcher/               watchdog handler: parses a file and injects nodes/edges
+```
 
-* Python `>= 3.11`
-* [uv](https://github.com/astral-sh/uv) (Fast Python Package Installer)
-* Rust toolchain (only for local `engramedb` development)
+Every tool call first drains pending file-change events on the main thread (all Rust
+calls stay on one thread), then reads the graph.
 
-### Installation
+---
+
+## Getting started
+
+Requirements: Python ≥ 3.11 (< 3.14), [uv](https://github.com/astral-sh/uv).
 
 ```bash
 git clone https://github.com/ghassenTn/cordyceps_mcp.git
 cd cordyceps_mcp
 uv sync --python 3.11
+uv run python main.py /path/to/workspace     # stdio MCP server
+# or, after installation:
+uv run cordyceps-mcp /path/to/workspace
 ```
 
-This installs `engramedb` from PyPI as declared in `pyproject.toml`. No local engine checkout required for normal use.
-
-### Local Development (engine + MCP)
-
-For editable installs where MCP uses a sibling `engramedb` checkout:
+`engramedb` is installed from PyPI. For engine development use a sibling checkout:
 
 ```bash
-git clone https://github.com/ghassenTn/cordyceps_mcp.git
-git clone https://github.com/ghassenTn/engramedb.git
 # layout: cordyceps_mcp/  ../engramedb/
-cd cordyceps_mcp
-uv sync --python 3.11  # uses [tool.uv.sources] path = "../engramedb"
+#   [tool.uv.sources] engramedb = { path = "../engramedb", editable = true }
+cd ../engramedb && maturin develop --release
 ```
 
-Engine development:
+### OpenCode configuration
 
-```bash
-cd ../engramedb
-maturin develop --release
-```
-
----
-
-## 📂 Command Guide
-
-Run the following commands using the `uv` toolchain:
-
-| Command | Description |
-| :--- | :--- |
-| `uv run python main.py [workspace_path]` | Starts the MCP server (stdio transport). Defaults to current directory. |
-| `uv run python -m pytest` | Runs the full test suite (89 tests passing). |
-| `uv run python -m pytest -m unit` | Runs only parser and YAML serialization unit tests. |
-| `uv run python -m pytest -m integration` | Runs graph database and editor integration tests. |
-| `uv run python -m pytest -xvs test_ast_parser.py` | Fast feedback loop for debugging parser tests. |
-
----
-
-## MCP Tools Provided
-
-The server exposes a single unified tool. Legacy standalone tools (`search_nodes`, `analyse_impact`, `trace_business_flow`, etc.) were removed — all capabilities are now via the query DSL.
-
-### `query_dsl` — Unified Code Graph Query
-
-Executes a Cordyceps Query DSL string against the live CSR graph. All outputs are YAML.
-
-**Parameters**
-
-* `raw` (str, required): DSL query string
-* `expand_body` (bool, default `false`): when `true` returns full `body`, otherwise `body_preview` (150 chars)
-
-`query_dsl_help` returns the full DSL grammar.
-
-**DSL quick reference**
-
-| Query | Example | Purpose |
-|---|---|---|
-| `GET` | `GET functions WHERE name LIKE 'create_*' LIMIT 20` | Filtered listing with projections, `ORDER BY`, `LIMIT`/`OFFSET` |
-| `SEARCH` | `SEARCH "sale" IN functions WHERE file_path CONTAINS 'sales'` | Fuzzy / regex search |
-| `GLOB` | `GLOB "src/modules/sales/*.py"` | File glob |
-| `METADATA` | `METADATA FOR "src/api.py:create_sale"` | Full node metadata + callers/callees |
-| `IMPACT` | `IMPACT OF "src/services.py:create_sale" DIRECTION callers DEPTH 2` | Blast radius (callers/callees) |
-| `PATH` | `PATH FROM "a.py:foo" TO "b.py:bar"` | Shortest dependency path |
-| `FLOW` | `FLOW FOR "src/api.py:create_sale" DEPTH 5` | Business-flow tree |
-| `STACK` | `STACK FOR "/api/sales"` | Frontend hook → backend handler trace |
-| `STATS` | `STATS FOR "src/modules/sales"` | Module stats (LOC, counts) |
-| `CHECK LAYERS` | `CHECK LAYERS "domain" AGAINST "infra"` | Architecture layer violation check |
-
-All legacy search / impact / flow / full-stack capabilities are available through `query_dsl` with the appropriate verb — see `query_dsl_help` for the complete command reference.
-
----
-## IDE Integration (example kiro ide)
 ```json
 {
-  "mcpServers": {
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
     "cordyceps": {
-      "command": "uv",
-      "args": [
-        "--directory",
-        "/path/to/cordyceps_mcp",
-        "run",
-        "--python",
-        "3.11",
-        "python",
-        "/path/to/cordyceps_mcp/main.py",
-        "/path/to/your workspace"
-      ],
-      "autoApprove": [
-        "query_dsl"
-      ]
+      "type": "local",
+      "enabled": true,
+      "timeout": 120000,
+      "command": ["uv", "--directory", "/path/to/cordyceps_mcp", "run", "--python", "3.11",
+                  "python", "main.py", "/path/to/your/workspace"]
     }
-
-  }
+  },
+  "permission": {"cordyceps_*": "allow"}
 }
 ```
 
-## 🧪 Testing
-
-The test coverage covers parsing, synchronization safety, and graph queries. To run tests, use:
-```bash
-uv run python -m pytest
-```
-All tests use pytest fixtures defined in `conftest.py` with custom thread-safety and environment isolated markers.
+OpenCode prefixes MCP tools with the server name, hence the `cordyceps_*` permission.
+The workspace path may also come from `WORKSPACE_PATH`; the current directory is the last
+fallback. The index is persisted next to the workspace (`.engram_snapshot.bin`,
+`.cordyceps_index_meta.json`) and reused on restart when no file changed.
 
 ---
 
-## 📄 License
+## Tests
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+```bash
+uv run python -m pytest                 # full suite
+uv run python -m pytest -m unit         # parser, adapters, structural tools (in-memory fake graph), MCP boundary
+uv run python -m pytest -m integration  # real workspaces: parse -> index -> tools (test_indexing.py)
+```

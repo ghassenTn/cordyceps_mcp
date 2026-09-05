@@ -1336,6 +1336,82 @@ export function App() {
         assert "Header" in app_calls
         assert "AchatPage" in app_calls
 
+    def test_javascript_contextual_metadata_and_call_ownership(self, parser, isolated_temp_dir):
+        ts_path = os.path.join(isolated_temp_dir, "context.ts")
+        with open(ts_path, "w") as f:
+            f.write("""
+import DefaultService, { work as runWork, Repo } from './service';
+import * as helpers from './helpers';
+import type { Shape } from './types';
+
+export { runWork as publicWork };
+export default DefaultService;
+
+class Runner {
+    plainField: string;
+    handler = () => helpers.handle();
+
+    constructor(private repo: Repo) {}
+
+    run(arg: Shape) {
+        const local = new DefaultService();
+        function nested() { deepOnly(); }
+        return this.repo.save() + super.run() + helpers.work() + local.go();
+    }
+}
+
+function outer() {
+    before();
+    function inner() { nestedOnly(); }
+    return after();
+}
+""")
+        result = parser.parse_file(ts_path)
+
+        bindings = result["javascript_import_bindings"]
+        assert bindings["DefaultService"] == {
+            "kind": "default", "source": "./service", "imported": "default",
+            "type_only": False,
+        }
+        assert bindings["runWork"]["imported"] == "work"
+        assert bindings["helpers"]["kind"] == "namespace"
+        assert bindings["Shape"]["type_only"] is True
+        assert result["javascript_exports"]["publicWork"] == {
+            "kind": "local", "local": "runWork"}
+        assert result["javascript_exports"]["default"] == {
+            "kind": "local", "local": "DefaultService"}
+
+        runner = next(c for c in result["classes"] if c["name"] == "Runner")
+        methods = {m["name"]: m for m in runner["methods"]}
+        assert "plainField" not in methods
+        assert "handler" in methods
+        assert methods["handler"]["calls"] == ["helpers.handle"]
+        assert methods["run"]["calls"] == [
+            "this.repo.save", "super.run", "helpers.work", "local.go"]
+        assert methods["run"]["javascript_receiver_types"] == {
+            "this.plainField": "string", "this.repo": "Repo",
+            "arg": "Shape", "local": "DefaultService"}
+
+        functions = {fn["node_name"]: fn for fn in result["functions"]}
+        assert functions["outer"]["calls"] == ["before", "after"]
+        assert functions["outer.inner"]["calls"] == ["nestedOnly"]
+
+    def test_javascript_dynamic_receivers_and_callbacks(self, parser, isolated_temp_dir):
+        ts_path = os.path.join(isolated_temp_dir, "callbacks.ts")
+        with open(ts_path, "w") as f:
+            f.write("""
+function work() { return true; }
+function make() { return {}; }
+function dynamic() { return make().work(); }
+function callback(items: number[]) { return items.map(item => work()); }
+""")
+        result = parser.parse_file(ts_path)
+        functions = {fn["node_name"]: fn for fn in result["functions"]}
+        assert functions["dynamic"]["calls"] == ["make"]
+        callback_name = next(call for call in functions["callback"]["calls"]
+                             if call.startswith("callback_L"))
+        assert functions[f"callback.{callback_name}"]["calls"] == ["work"]
+
     def test_anonymous_express_route_handlers_indexed(self, parser, isolated_temp_dir):
         """Anonymous `router.get('/x', async (req, res) => {...})` handlers must
         be extracted as traceable Function nodes, and the route's view_name must

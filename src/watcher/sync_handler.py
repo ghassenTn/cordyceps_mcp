@@ -446,9 +446,9 @@ class GraphSyncHandler(FileSystemEventHandler):
 
     def _relative_path(self, absolute_path: str) -> str:
         try:
-            return os.path.relpath(absolute_path, self.workspace_path)
+            return os.path.relpath(absolute_path, self.workspace_path).replace(os.sep, "/")
         except ValueError:
-            return absolute_path
+            return absolute_path.replace(os.sep, "/")
 
     def update_file_in_graph(self, file_path: str, skip_rebuild: bool = False, pre_parsed_data: dict = None):
         """
@@ -462,28 +462,39 @@ class GraphSyncHandler(FileSystemEventHandler):
         from src.database import get_graph_db
         db = get_graph_db(self.workspace_path)
 
-        # 1. Invalidate old data for this file (O(k) in Rust)
         rel_path = self._relative_path(file_path)
-        removed = db.client.invalidate_file(rel_path)
-        if removed > 0:
-            logger.debug(f"Invalidated {removed} old nodes from {rel_path}")
-
-        # Invalidate python-files cache since file system changed
-        self._has_source_files.cache_clear()
-
         if not os.path.exists(file_path):
+            removed = db.client.invalidate_file(rel_path)
+            self._has_source_files.cache_clear()
             if not skip_rebuild:
                 db.client.rebuild()
-            return
+            return True
 
+        # Parse before invalidating. A transient read/grammar/parser failure
+        # must not destroy the last-known-good index for this file.
         try:
+            before = os.stat(file_path)
             if pre_parsed_data is not None:
                 parsed_data = pre_parsed_data
             else:
                 parsed_data = self.parser.parse_file(file_path)
+            after = os.stat(file_path)
+            source_signature = [after.st_mtime_ns, after.st_size]
+            expected_signature = parsed_data.get("_source_signature")
+            if expected_signature is not None:
+                if source_signature != expected_signature:
+                    raise RuntimeError("file changed after it was parsed")
+            elif source_signature != [before.st_mtime_ns, before.st_size]:
+                raise RuntimeError("file changed while it was being parsed")
         except Exception as e:
             logger.error(f"Failed to parse '{rel_path}': {e}")
-            return
+            return False
+
+        # Replace old data only after a valid parse is available.
+        removed = db.client.invalidate_file(rel_path)
+        if removed > 0:
+            logger.debug(f"Invalidated {removed} old nodes from {rel_path}")
+        self._has_source_files.cache_clear()
 
         # 1.5 Register Folder nodes (only if directory actually has .py files)
         folder_path = os.path.dirname(rel_path)
@@ -505,7 +516,7 @@ class GraphSyncHandler(FileSystemEventHandler):
                     db.client.add_structural_edge(current_path, parent)
 
         # 2. Register the File node
-        extra_file_meta = {}
+        extra_file_meta = {'source_signature': source_signature}
         file_body = parsed_data.get('file_body', '')
         if file_body:
             extra_file_meta['body'] = file_body
@@ -516,6 +527,14 @@ class GraphSyncHandler(FileSystemEventHandler):
             extra_file_meta['python_shadowed_names'] = _python_shadowed_names(file_body)
         if 'imports' in parsed_data:
             extra_file_meta['imports'] = parsed_data['imports']
+        if parsed_data.get('javascript_import_bindings'):
+            extra_file_meta['javascript_import_bindings'] = parsed_data[
+                'javascript_import_bindings']
+        if parsed_data.get('javascript_import_sources'):
+            extra_file_meta['javascript_import_sources'] = parsed_data[
+                'javascript_import_sources']
+        if parsed_data.get('javascript_exports'):
+            extra_file_meta['javascript_exports'] = parsed_data['javascript_exports']
         import_lines = parsed_data.get('import_lines') or {}
         if import_lines:
             extra_file_meta['import_lines'] = import_lines
@@ -549,6 +568,7 @@ class GraphSyncHandler(FileSystemEventHandler):
                 'view_name': view_name,
                 'route_name': route_name,
                 'url': url,
+                'declared_url': url,
                 'func': up.get('func', 'path'),
                 'methods': up.get('methods', []),
             }
@@ -606,6 +626,15 @@ class GraphSyncHandler(FileSystemEventHandler):
                     extra_meta['body'] = method['body']
                 if method.get('decorators'):
                     extra_meta['decorators'] = method['decorators']
+                if method.get('javascript_shadowed_names'):
+                    extra_meta['javascript_shadowed_names'] = method[
+                        'javascript_shadowed_names']
+                if method.get('javascript_receiver_types'):
+                    extra_meta['javascript_receiver_types'] = method[
+                        'javascript_receiver_types']
+                if 'javascript_lexical_this' in method:
+                    extra_meta['javascript_lexical_this'] = method[
+                        'javascript_lexical_this']
                 template_refs = method.get('template_refs', [])
                 if template_refs:
                     extra_meta['template_refs'] = template_refs
@@ -644,6 +673,15 @@ class GraphSyncHandler(FileSystemEventHandler):
                 extra_meta['body'] = func['body']
             if func.get('decorators'):
                 extra_meta['decorators'] = func['decorators']
+            if func.get('javascript_shadowed_names'):
+                extra_meta['javascript_shadowed_names'] = func[
+                    'javascript_shadowed_names']
+            if func.get('javascript_receiver_types'):
+                extra_meta['javascript_receiver_types'] = func[
+                    'javascript_receiver_types']
+            if 'javascript_lexical_this' in func:
+                extra_meta['javascript_lexical_this'] = func[
+                    'javascript_lexical_this']
             template_refs = func.get('template_refs', [])
             if template_refs:
                 extra_meta['template_refs'] = template_refs
@@ -724,6 +762,7 @@ class GraphSyncHandler(FileSystemEventHandler):
                 'view_name': funcs[0] if funcs else '',
                 'view_names': funcs,
                 'url': url,
+                'declared_url': url,
                 'methods': methods,
                 'framework': framework,
                 'func': 'decorator',
@@ -759,15 +798,16 @@ class GraphSyncHandler(FileSystemEventHandler):
             db.client.add_to_extra_meta(rel_path, "exports", exports_data)
 
         # 5. Connect IMPORTS
-        for imp in parsed_data.get('imports', []):
-            imp_path = self._resolve_import_path(imp, rel_path)
-            if imp_path is None:
-                continue
-            # Ensure the imported file node exists in metadata
-            if not db.client.contains(imp_path):
-                db.client.add_node(imp_path, "File", os.path.basename(imp_path), imp_path)
-            # Import edge: target file affects importer
-            db.client.add_structural_edge(imp_path, rel_path)
+        if rel_path.endswith('.py'):
+            for imp in parsed_data.get('imports', []):
+                imp_path = self._resolve_import_path(imp, rel_path)
+                if imp_path is None:
+                    continue
+                # Ensure the imported file node exists in metadata
+                if not db.client.contains(imp_path):
+                    db.client.add_node(imp_path, "File", os.path.basename(imp_path), imp_path)
+                # Import edge: target file affects importer
+                db.client.add_structural_edge(imp_path, rel_path)
 
         # 6. Connect CALLS (O(1) per call via Rust name index)
         # We do this AFTER all nodes for the current file are registered
@@ -809,6 +849,7 @@ class GraphSyncHandler(FileSystemEventHandler):
         if not skip_rebuild:
             db.client.rebuild()
             logger.info(f"Updated '{rel_path}' in EngramDB graph.")
+        return True
 
     def remove_file_from_graph(self, file_path: str, skip_rebuild: bool = False):
         """Remove all nodes belonging to a file."""
@@ -871,20 +912,30 @@ class GraphSyncHandler(FileSystemEventHandler):
         return None
 
     def _is_excluded(self, path: str) -> bool:
-        """Check if path contains any excluded directories."""
-        if path.endswith('.d.ts'):
+        """Apply the same workspace-relative exclusion policy as the full scan."""
+        if self.is_internal_artifact(path):
             return True
-        parts = path.replace('\\', '/').split('/')
+        if path.lower().endswith('.d.ts'):
+            return True
+        try:
+            rel = os.path.relpath(path, self.workspace_path)
+        except ValueError:
+            return True
+        if rel == ".." or rel.startswith(".." + os.sep):
+            return True
+        parts = rel.replace('\\', '/').split('/')[:-1]
+        current = self.workspace_path
         for part in parts:
             if part.startswith('.') and part not in ('.', '..'):
                 return True
-            if part in self._excluded:
+            current = os.path.join(current, part)
+            if self.is_excluded_dir(part, current, self._excluded):
                 return True
         return False
 
     def on_modified(self, event):
         """Queue file modification event with debouncing."""
-        if event.is_directory or not event.src_path.endswith(self.supported_extensions):
+        if event.is_directory or not event.src_path.lower().endswith(self.supported_extensions):
             return
         if self._is_excluded(event.src_path):
             return
@@ -892,14 +943,14 @@ class GraphSyncHandler(FileSystemEventHandler):
 
     def on_created(self, event):
         """Queue file creation event with debouncing."""
-        if not event.is_directory and event.src_path.endswith(self.supported_extensions):
+        if not event.is_directory and event.src_path.lower().endswith(self.supported_extensions):
             if self._is_excluded(event.src_path):
                 return
             _enqueue_debounced_event('update', event.src_path)
 
     def on_deleted(self, event):
         """Queue file deletion event with debouncing."""
-        if not event.is_directory and event.src_path.endswith(self.supported_extensions):
+        if not event.is_directory and event.src_path.lower().endswith(self.supported_extensions):
             if self._is_excluded(event.src_path):
                 return
             _enqueue_debounced_event('delete', event.src_path)
@@ -907,9 +958,9 @@ class GraphSyncHandler(FileSystemEventHandler):
     def on_moved(self, event):
         """Queue file move event with debouncing."""
         if not event.is_directory:
-            if event.src_path.endswith(self.supported_extensions) and not self._is_excluded(event.src_path):
+            if event.src_path.lower().endswith(self.supported_extensions) and not self._is_excluded(event.src_path):
                 _enqueue_debounced_event('delete', event.src_path)
-            if event.dest_path.endswith(self.supported_extensions) and not self._is_excluded(event.dest_path):
+            if event.dest_path.lower().endswith(self.supported_extensions) and not self._is_excluded(event.dest_path):
                 _enqueue_debounced_event('update', event.dest_path)
 
 def _enqueue_debounced_event(action: str, file_path: str, debounce_threshold: float = 0.5):
