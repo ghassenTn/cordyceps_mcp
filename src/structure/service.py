@@ -35,6 +35,7 @@ MAX_TOP_LEVEL_PREVIEW = 8  # symbol names shown inline per file in a directory m
 MAX_IMPORTS = 40
 MAX_RELATED = 50           # callers / callees / members / candidates in lookup
 MAX_UNRESOLVED = 30
+MAX_POSSIBLE_CALLERS = 30  # by-name candidates recovered from unresolved calls
 MAX_IMPACT_NODES = 300
 MAX_IMPACT_DEPTH = 25
 DEFAULT_IMPACT_DEPTH = 2
@@ -134,6 +135,15 @@ class CodeStructure:
         direct = [n for n in neighbours(target) if n != target]
         depths, truncated, beyond = self._bfs(target, neighbours, depth)
         affected_ids = list(depths)
+        # Callers the resolver could not link (untyped receivers) are recovered
+        # by name and reported apart from the confirmed graph; callees the target
+        # reaches through unresolved calls are the mirror image.
+        possible: list[dict] = []
+        unresolved_callees: list[str] = []
+        if direction == CALLERS:
+            possible = self._possible_callers(view, target, set(affected_ids))
+        else:
+            unresolved_callees = self._unresolved_calls(view, target, direct)
 
         meta = self._meta()
         meta.update({
@@ -146,11 +156,24 @@ class CodeStructure:
             "more_beyond_depth": beyond,
             "entry_format": ENTRY_FORMAT,
         })
+        if direction == CALLERS:
+            meta["possible"] = len(possible)
         warnings = list(meta.get("warnings", []))
         if truncated:
             warnings.append(f"Traversal stopped after {MAX_IMPACT_NODES} nodes; lower depth or start from a narrower symbol.")
         if beyond:
             warnings.append(f"Nodes at depth {depth} still have unexplored {direction}; raise depth to continue.")
+        if possible:
+            warnings.append(
+                f"{len(possible)} possible_callers reach '{view.name_of(target)}' through a receiver the "
+                "resolver could not type (see 'via'); they are matched by name only, are not in 'affected', "
+                "and must be verified by reading the call site."
+            )
+        if unresolved_callees:
+            warnings.append(
+                f"{len(unresolved_callees)} calls made by the target could not be resolved to a symbol "
+                "(unresolved_callees); their dependencies are not in 'affected'."
+            )
         if any(view.type_of(n) in ("Route", "File", "Middleware") for n in affected_ids):
             warnings.append("Route/File/Middleware entries come from framework and HTTP-call linking, which is heuristic.")
         confidence_nodes = [target, *affected_ids]
@@ -171,6 +194,16 @@ class CodeStructure:
         }
         if len(direct) > MAX_RELATED:
             out[f"direct_{direction}_omitted"] = len(direct) - MAX_RELATED
+        if possible:
+            head, omitted = bounded(possible, MAX_POSSIBLE_CALLERS)
+            out["possible_callers"] = head
+            if omitted:
+                out["possible_callers_omitted"] = omitted
+        if unresolved_callees:
+            head, omitted = bounded(unresolved_callees, MAX_UNRESOLVED)
+            out["unresolved_callees"] = head
+            if omitted:
+                out["unresolved_callees_omitted"] = omitted
         return out
 
     # ── code_map internals ───────────────────────────────────────────
@@ -367,6 +400,12 @@ class CodeStructure:
         rel: dict[str, Any] = {}
         rel.update(self._bounded_list("callers", callers))
         rel.update(self._bounded_list("callees", callees))
+        possible = self._possible_callers(view, node_id, caller_set)
+        if possible:
+            head, omitted = bounded(possible, MAX_POSSIBLE_CALLERS)
+            rel["possible_callers"] = head
+            if omitted:
+                rel["possible_callers_omitted"] = omitted
         if members:
             rel.update(self._bounded_list("members", members))
         if related:
@@ -442,6 +481,45 @@ class CodeStructure:
             if call in resolved_names or tail in resolved_names:
                 continue
             out.append(call)
+        return out
+
+    def _possible_callers(self, view: IndexView, target: str, confirmed: set[str]) -> list[dict]:
+        """Symbols whose *unresolved* calls end with the target's name.
+
+        The resolver links a call only when it can identify the receiver; a
+        method reached through an untyped value (``self.app.router.add_route``
+        where ``app`` is an unannotated parameter) stays unresolved and the
+        caller silently drops out of ``callers``/``impact``. The raw call names
+        are still in the graph, so this recovers those callers *by name* and
+        labels each with the call text that matched. They are candidates to
+        verify, never confirmed edges: a same-named method on another class
+        would match too. Calls that did resolve to a same-named symbol elsewhere
+        (``WebSocketRouter.add_route``) are excluded, so the confirmed graph is
+        never contradicted.
+        """
+        name = view.name_of(target)
+        if not name or view.type_of(target) not in SYMBOL_TYPES or is_noise_call(name):
+            return []
+        out: list[dict] = []
+        for node_id in view.symbol_ids():
+            if node_id == target or node_id in confirmed:
+                continue
+            raw = (view.get(node_id) or {}).get("calls") or []
+            if isinstance(raw, str):
+                raw = [raw]
+            matching = _unique(
+                str(call).strip() for call in raw
+                if str(call).strip().rsplit(".", 1)[-1] == name and not is_noise_call(str(call))
+            )
+            if not matching:
+                continue
+            resolved = {view.name_of(c) for c in _unique(self.client.get_callees(node_id))}
+            if name in resolved:
+                continue  # linked to another symbol of that name; not a candidate here
+            out.append({"id": node_id, "via": matching[0] if len(matching) == 1 else matching})
+        out.sort(key=lambda entry: (view.file_of(entry["id"]),
+                                    (view.get(entry["id"]) or {}).get("lines", {}).get("start") or 0,
+                                    entry["id"]))
         return out
 
     # ── impact internals ─────────────────────────────────────────────

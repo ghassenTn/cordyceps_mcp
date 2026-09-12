@@ -40,8 +40,24 @@ def _dedupe_preserve_order(items: list) -> list:
 # detect a stale index (config changed without a rescan) so queries are never
 # silently answered from outdated data.
 INDEX_META_FILENAME = ".cordyceps_index_meta.json"
-# Written by the Rust engine on build(); restored automatically on init.
+# Written by the Rust engine on save(); restored automatically on init.
 SNAPSHOT_FILENAME = ".engram_snapshot.bin"
+# Where both persistence artifacts live. Defaults to the workspace root (the
+# historical layout); hosts that must keep the workspace pristine (checkpoints,
+# git pushes, external-change detection) point it elsewhere.
+INDEX_DIR_ENV = "CORDYCEPS_INDEX_DIR"
+
+
+def resolve_index_dir(workspace_path: str, index_dir: str | None = None) -> str:
+    """Directory holding the snapshot + meta sidecar for ``workspace_path``.
+
+    Explicit argument > ``CORDYCEPS_INDEX_DIR`` > the workspace itself. The
+    directory is created on demand so a fresh cache location works first time.
+    """
+    chosen = index_dir or os.environ.get(INDEX_DIR_ENV) or workspace_path
+    chosen = os.path.abspath(os.path.expanduser(chosen))
+    os.makedirs(chosen, exist_ok=True)
+    return chosen
 
 
 class EngramClient:
@@ -54,16 +70,20 @@ class EngramClient:
     - Binary persistence
     """
 
-    def __init__(self, workspace_path=None):
+    def __init__(self, workspace_path=None, index_dir=None):
         self.workspace_path = workspace_path or os.environ.get("WORKSPACE_PATH", os.getcwd())
+        # The Rust engine never reads source files: the path it receives is only
+        # where it restores/saves ``.engram_snapshot.bin``. Keeping that apart from
+        # the workspace lets hosts store the index in a cache directory.
+        self.index_dir = resolve_index_dir(self.workspace_path, index_dir)
         # The Rust constructor handles restoring from binary snapshot automatically
-        self.engine = engramdb.PyMetadataEngine(self.workspace_path)
+        self.engine = engramdb.PyMetadataEngine(self.index_dir)
         self.is_read_only = False
         # Extra metadata not supported by the Rust engine (e.g. Django ORM relations)
         self._extra_meta = {}
         self._hydrate_extra_meta()
 
-        logger.info(f"EngramDB Rust engine initialized for: {self.workspace_path}")
+        logger.info(f"EngramDB Rust engine initialized for: {self.workspace_path} (index: {self.index_dir})")
 
     def _hydrate_extra_meta(self) -> None:
         """Restore Python post-processing metadata from Rust snapshots."""
@@ -204,7 +224,11 @@ class EngramClient:
         self.engine.save()
 
     def _index_meta_path(self) -> str:
-        return os.path.join(self.workspace_path, INDEX_META_FILENAME)
+        return os.path.join(self.index_dir, INDEX_META_FILENAME)
+
+    def snapshot_path(self) -> str:
+        """Where the Rust engine persists the binary graph snapshot."""
+        return os.path.join(self.index_dir, SNAPSHOT_FILENAME)
 
     def write_index_meta(self, node_count: int = None, file_manifest: dict = None,
                          dirty: bool = False) -> None:

@@ -85,7 +85,10 @@ def lookup_symbol(symbol: str, path: str | None = None) -> str:
     signature, container, callers, callees, members, unresolved calls),
     ``ambiguous`` (several candidates; call again with an exact id), or
     ``not_found`` (with close-match suggestions). Never picks one of several
-    matches silently.
+    matches silently. ``possible_callers`` lists symbols that call this name
+    through a receiver the resolver could not type (``via`` shows the call
+    text, e.g. ``self.app.router.add_route``): matched by name only, verify
+    them before relying on them.
     """
     return _answer("lookup_symbol", lambda s: s.lookup(symbol, path))
 
@@ -102,7 +105,12 @@ def impact(symbol: str, depth: ImpactDepth = DEFAULT_IMPACT_DEPTH,
     ``meta.total`` separates direct from transitive, and
     ``meta.more_beyond_depth`` / ``meta.truncated`` say when the picture is
     incomplete. Only executable edges (calls, route/HTTP links) are followed,
-    never imports or containment.
+    never imports or containment. With ``direction='callers'``,
+    ``possible_callers`` adds symbols that call this name through an untyped
+    receiver (not linked in the graph, so absent from ``affected``): read
+    those call sites to confirm or rule them out. With ``'callees'``,
+    ``unresolved_callees`` lists what the target calls that could not be
+    linked.
     """
     return _answer("impact", lambda s: s.impact(symbol, depth, direction))
 

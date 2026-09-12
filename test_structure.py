@@ -7,7 +7,7 @@ behaviour on real parsed workspaces is covered by ``test_indexing.py``.
 import pytest
 
 from src.structure import CodeStructure, IndexView, resolve_symbol, RESOLVED, AMBIGUOUS, NOT_FOUND, normalize_path
-from src.structure.service import MAX_IMPACT_NODES, MAX_RELATED
+from src.structure.service import MAX_IMPACT_NODES, MAX_POSSIBLE_CALLERS, MAX_RELATED
 
 pytestmark = pytest.mark.unit
 
@@ -323,6 +323,82 @@ class TestImpact:
 
 
 # ── code_map ──────────────────────────────────────────────────────────
+
+class TestPossibleCallers:
+    """Callers the resolver could not link are recovered by name, apart from the graph."""
+
+    @pytest.fixture
+    def graph(self, client):
+        # Router.add_route has one resolved caller; AdminDashboard._register_routes
+        # calls it through an untyped receiver (no edge, raw call kept); the
+        # WebSocketRouter decoy resolves its own add_route and must not appear.
+        client.add("fx/routing.py", "File", lines={"start": 1, "end": 60})
+        client.add("fx/routing.py:Router", "Class", lines={"start": 1, "end": 60})
+        client.add("fx/routing.py:Router.add_route", "Function", lines={"start": 5, "end": 20},
+                   signature="def add_route(self, path, handler, methods, name=None)")
+        client.add("fx/routing.py:Router.get", "Function", lines={"start": 22, "end": 30}, calls=["self.add_route"])
+        client.add("fx/admin.py", "File", lines={"start": 1, "end": 40})
+        client.add("fx/admin.py:AdminDashboard", "Class", lines={"start": 1, "end": 40})
+        client.add("fx/admin.py:AdminDashboard._register_routes", "Function", lines={"start": 10, "end": 30},
+                   calls=["self.app.router.add_route", "self.app.router.add_route", "Response"])
+        client.add("fx/ws.py", "File", lines={"start": 1, "end": 40})
+        client.add("fx/ws.py:WebSocketRouter", "Class", lines={"start": 1, "end": 40})
+        client.add("fx/ws.py:WebSocketRouter.add_route", "Function", lines={"start": 20, "end": 25})
+        client.add("fx/ws.py:WebSocketRouter.route", "Function", lines={"start": 5, "end": 15}, calls=["self.add_route"])
+        client.add("fx/other.py", "File", lines={"start": 1, "end": 10})
+        client.add("fx/other.py:unrelated", "Function", lines={"start": 1, "end": 5}, calls=["self.add_routes", "add_route_later"])
+        for child, parent in [("fx/routing.py:Router.add_route", "fx/routing.py:Router"), ("fx/routing.py:Router.get", "fx/routing.py:Router"),
+                              ("fx/admin.py:AdminDashboard._register_routes", "fx/admin.py:AdminDashboard"),
+                              ("fx/ws.py:WebSocketRouter.add_route", "fx/ws.py:WebSocketRouter"), ("fx/ws.py:WebSocketRouter.route", "fx/ws.py:WebSocketRouter")]:
+            client.contains_edge(child, parent)
+        client.call("fx/routing.py:Router.get", "fx/routing.py:Router.add_route")
+        client.call("fx/ws.py:WebSocketRouter.route", "fx/ws.py:WebSocketRouter.add_route")
+        return CodeStructure(client, "/ws")
+
+    def test_lookup_reports_by_name_candidates_with_the_call_text(self, graph):
+        rel = graph.lookup("Router.add_route")["relationships"]
+        assert rel["callers"] == ["fx/routing.py:Router.get"]
+        assert rel["possible_callers"] == [
+            {"id": "fx/admin.py:AdminDashboard._register_routes", "via": "self.app.router.add_route"},
+        ]
+
+    def test_impact_keeps_candidates_out_of_affected_and_warns(self, graph):
+        out = graph.impact("Router.add_route", depth=3)
+        assert out["direct_callers"] == ["fx/routing.py:Router.get"]
+        assert list(out["affected"]) == ["fx/routing.py"]
+        assert out["meta"]["total"] == 1 and out["meta"]["possible"] == 1
+        assert out["possible_callers"] == [
+            {"id": "fx/admin.py:AdminDashboard._register_routes", "via": "self.app.router.add_route"},
+        ]
+        assert any("possible_callers" in w and "verified" in w for w in out["meta"]["warnings"])
+
+    def test_decoy_resolved_to_its_own_class_is_not_a_candidate(self, graph):
+        out = graph.impact("Router.add_route")
+        ids = {entry["id"] for entry in out["possible_callers"]}
+        assert "fx/ws.py:WebSocketRouter.route" not in ids
+        assert "fx/other.py:unrelated" not in ids  # add_routes / add_route_later: different names
+
+    def test_callees_direction_reports_unresolved_callees_instead(self, graph):
+        out = graph.impact("AdminDashboard._register_routes", direction="callees")
+        assert "possible_callers" not in out and "possible" not in out["meta"]
+        assert out["unresolved_callees"] == ["self.app.router.add_route", "Response"]
+        assert any("unresolved_callees" in w for w in out["meta"]["warnings"])
+
+    def test_symbol_without_candidates_has_no_key(self, structure):
+        out = structure.impact("write_db")
+        assert "possible_callers" not in out and out["meta"]["possible"] == 0
+        assert "possible_callers" not in structure.lookup("write_db")["relationships"]
+
+    def test_common_name_candidates_are_bounded(self, client):
+        client.add("m.py", "File", lines={"start": 1, "end": 500})
+        client.add("m.py:save", "Function", lines={"start": 1, "end": 3})
+        for i in range(MAX_POSSIBLE_CALLERS + 5):
+            client.add(f"m.py:f{i}", "Function", lines={"start": 10 + i, "end": 11 + i}, calls=["obj.save"])
+        out = CodeStructure(client, "/ws").impact("m.py:save")
+        assert len(out["possible_callers"]) == MAX_POSSIBLE_CALLERS
+        assert out["possible_callers_omitted"] == 5
+        assert out["meta"]["possible"] == MAX_POSSIBLE_CALLERS + 5
+
 
 class TestCodeMap:
     def test_root_directory(self, structure):

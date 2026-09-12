@@ -100,6 +100,11 @@ Excluded directories: `node_modules`, `venv`/`.venv`, `__pycache__`, `target`, `
 `build`, `migrations`, `.git`, `.idea`, `.vscode`, `coverage`, `.next`, `.nuxt`, fixture
 directories, and any dot-directory. Extend with `CORDYCEPS_EXCLUDE=dir1,dir2`.
 
+Persistence (`.engram_snapshot.bin` + `.cordyceps_index_meta.json`) is written to the
+workspace root by default. Set `CORDYCEPS_INDEX_DIR=/some/cache/dir` to keep the
+workspace pristine (useful when the workspace is checkpointed, pushed, or watched for
+external changes by the host). The directory is created on demand.
+
 ---
 
 ## Architecture

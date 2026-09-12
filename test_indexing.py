@@ -1194,3 +1194,72 @@ def test_code_map_on_real_workspace(indexer):
     assert models["symbols"][0]["name"] == "User"
     assert models["symbols"][0]["members"][0]["name"] == "name"
     assert models["symbols"][0]["members"][0]["lines"] == "2-3"
+
+
+def test_possible_callers_recover_untyped_receiver_calls_without_the_decoy(indexer):
+    """Real parse of the pattern that hides callers: ``self.app.router.add_route``
+    where ``app`` is an unannotated parameter (no resolver can type it), next to
+    another class defining its own ``add_route`` that resolves normally."""
+    _, structure = indexer({
+        "fx/__init__.py": "",
+        "fx/routing.py": (
+            "class Router:\n"
+            "    def add_route(self, path, handler, methods=None, name=None):\n"
+            "        return (path, handler)\n\n"
+            "    def get(self, path, name=None):\n"
+            "        def decorator(handler):\n"
+            "            self.add_route(path, handler, ['GET'], name)\n"
+            "            return handler\n"
+            "        return decorator\n"
+        ),
+        "fx/app.py": (
+            "from fx.routing import Router\n\n"
+            "class Application:\n"
+            "    def __init__(self):\n"
+            "        self.router = Router()\n\n"
+            "    def add_docs(self):\n"
+            "        def docs(request):\n"
+            "            return 'docs'\n"
+            "        self.router.add_route('/docs', docs, ['GET'])\n"
+        ),
+        "fx/admin.py": (
+            "class AdminDashboard:\n"
+            "    def __init__(self, app, prefix='/admin'):\n"
+            "        self.app = app\n"
+            "        self.prefix = prefix\n\n"
+            "    def _register_routes(self):\n"
+            "        def index(request):\n"
+            "            return 'admin'\n"
+            "        self.app.router.add_route(self.prefix, index, ['GET'])\n"
+            "        self.app.router.add_route(self.prefix + '/api', index, ['GET'])\n"
+        ),
+        "fx/websocket.py": (
+            "class WebSocketRouter:\n"
+            "    def route(self, path):\n"
+            "        def decorator(handler):\n"
+            "            self.add_route(path, handler)\n"
+            "            return handler\n"
+            "        return decorator\n\n"
+            "    def add_route(self, path, handler):\n"
+            "        return (path, handler)\n"
+        ),
+    })
+    out = structure.impact("Router.add_route", depth=3)
+    assert out["ok"] and out["target"]["id"] == "fx/routing.py:Router.add_route"
+    confirmed = {entry.split(" ")[0] for entries in out["affected"].values() for entry in entries}
+    assert confirmed == {"Router.get.decorator", "Application.add_docs"}
+    assert "fx/websocket.py" not in out["affected"]
+    assert out["meta"]["possible"] == 1
+    assert out["possible_callers"] == [
+        {"id": "fx/admin.py:AdminDashboard._register_routes", "via": "self.app.router.add_route"},
+    ]
+    assert any("possible_callers" in w for w in out["meta"]["warnings"])
+
+    rel = structure.lookup("Router.add_route")["relationships"]
+    assert rel["possible_callers"][0]["id"] == "fx/admin.py:AdminDashboard._register_routes"
+    # The decoy keeps its own resolved caller. The untyped call is by definition a
+    # candidate for EVERY same-named method, so it is listed here too: the graph
+    # states what it cannot decide instead of guessing a receiver type.
+    decoy = structure.lookup("WebSocketRouter.add_route")["relationships"]
+    assert decoy["callers"] == ["fx/websocket.py:WebSocketRouter.route.decorator"]
+    assert decoy["possible_callers"] == rel["possible_callers"]

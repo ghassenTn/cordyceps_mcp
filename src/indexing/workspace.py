@@ -16,7 +16,6 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from src.database import get_graph_db
-from src.database.graph_client import SNAPSHOT_FILENAME
 from src.database.parser.language_adapter import LANGUAGE_ADAPTERS
 from src.watcher.sync_handler import GraphSyncHandler, get_sync_queue
 
@@ -160,7 +159,7 @@ class WorkspaceIndex:
         """
         c = self.client
         meta = c.load_index_meta()
-        snapshot = os.path.join(self.workspace_path, SNAPSHOT_FILENAME)
+        snapshot = c.snapshot_path()
         if not (os.path.exists(snapshot) and c.snapshot_loaded() and meta
                 and isinstance(meta.get("file_manifest"), dict)
                 and not c.is_index_stale()):
