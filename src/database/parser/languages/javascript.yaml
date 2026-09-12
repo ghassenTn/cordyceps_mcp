@@ -62,8 +62,9 @@ node_types:
   require_nodes: [lexical_declaration, variable_declaration]
   variable_declarator_nodes: [variable_declarator]
   arrow_function_nodes: [arrow_function]
-  # Component wrappers whose first function argument is the real component
-  arrow_wrapper_functions: [forwardRef, memo, observer]
+  # Wrapper calls whose function argument IS the bound value: `const X = memo(() => ...)`
+  # defines X (top-level and nested), so `X` keeps its name and owns the body calls.
+  arrow_wrapper_functions: [forwardRef, memo, observer, useCallback]
   function_expression_nodes: [function_expression]
   class_declaration_nodes: [class_declaration]
   function_declaration_nodes: [function_declaration]

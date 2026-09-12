@@ -88,6 +88,12 @@ def _normalize_symbol(raw: str, workspace_path: str | None) -> str:
 
 # ── matching tiers ───────────────────────────────────────────────────────
 
+def _qualified_forms(view: IndexView, nid: str) -> set[str]:
+    """Names a node answers to: its qualified name and, for definitions hoisted
+    out of inline callbacks, the display form the tools print (``App.checkBackend``)."""
+    return {view.qualified_name(nid), view.display_name(nid)}
+
+
 def _match_id_shorthand(view: IndexView, text: str) -> list[str]:
     file_part, qual = text.split(":", 1)
     file_part = file_part.strip("/")
@@ -98,12 +104,12 @@ def _match_id_shorthand(view: IndexView, text: str) -> list[str]:
         fp = view.file_of(nid)
         if not (fp == file_part or fp.endswith("/" + file_part)):
             continue
-        node_qual = view.qualified_name(nid)
-        if node_qual == qual:
+        forms = _qualified_forms(view, nid)
+        if qual in forms:
             exact.append(nid)
-        elif view.type_of(nid) in DOTTED_TYPES and node_qual.endswith("." + qual):
+        elif view.type_of(nid) in DOTTED_TYPES and any(f.endswith("." + qual) for f in forms):
             suffix.append(nid)
-        elif node_qual.lower() == qual.lower():
+        elif any(f.lower() == qual.lower() for f in forms):
             loose.append(nid)
     return exact or suffix or loose
 
@@ -113,10 +119,10 @@ def _match_name(view: IndexView, text: str) -> list[str]:
     exact: list[str] = []
     suffix: list[str] = []
     for nid in view.symbol_ids():
-        qual = view.qualified_name(nid)
-        if qual == text or view.name_of(nid) == text:
+        forms = _qualified_forms(view, nid)
+        if text in forms or view.name_of(nid) == text:
             exact.append(nid)
-        elif view.type_of(nid) in DOTTED_TYPES and qual.endswith("." + text):
+        elif view.type_of(nid) in DOTTED_TYPES and any(f.endswith("." + text) for f in forms):
             suffix.append(nid)
     if exact or suffix:
         return exact or suffix
@@ -149,9 +155,9 @@ def _suggest(view: IndexView, text: str, scope: str) -> list[str]:
     """Close matches over definition names and IDs, as hints only."""
     names: dict[str, str] = {}
     for nid in view.symbol_ids():
-        if not is_under(view.file_of(nid), scope):
+        if not is_under(view.file_of(nid), scope) or view.is_inline_callback(nid):
             continue
-        names.setdefault(view.qualified_name(nid), nid)
+        names.setdefault(view.display_name(nid), nid)
         names.setdefault(view.name_of(nid), nid)
     probe = text.split(":", 1)[1] if ":" in text else text
     probe = probe.rsplit(".", 1)[-1] if probe and "." in probe and "/" not in probe else probe

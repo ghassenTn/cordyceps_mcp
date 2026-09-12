@@ -18,6 +18,7 @@ Node ID conventions (produced by ``src/watcher/sync_handler.py``):
 from __future__ import annotations
 
 import os
+import re
 from typing import Any, Iterable
 
 # Node types that represent code definitions (as opposed to containers).
@@ -25,6 +26,21 @@ SYMBOL_TYPES = frozenset({"Class", "Function", "Declaration", "Route", "Middlewa
 CONTAINER_TYPES = frozenset({"File", "Folder"})
 # Types whose qualified names nest with "." (Outer.Inner, Class.method, outer.inner).
 DOTTED_TYPES = frozenset({"Class", "Function", "Declaration"})
+
+# Inline callbacks (``items.map(x => ...)``, ``useEffect(() => ...)``) are indexed
+# by the parser as ``callback_L<line>_C<col>`` Function nodes so that call
+# resolution keeps each literal's own lexical scope (parameter shadowing,
+# receiver types). They are *not* definitions an agent can name or navigate
+# to, so every tool treats them as transparent: hidden from outlines, their
+# named children hoisted to the enclosing definition, and their call edges
+# attributed to the nearest named ancestor. Other synthetic names
+# (``anonymous_L<n>`` default exports, ``handler_<m>_L<n>`` route handlers)
+# stay visible because they are the file's real entry points.
+_INLINE_CALLBACK = re.compile(r"^callback_L\d+_C\d+$")
+
+
+def is_inline_callback_name(name: str) -> bool:
+    return bool(_INLINE_CALLBACK.match(str(name or "")))
 
 
 def normalize_path(path: str | None, workspace_path: str | None = None) -> str:
@@ -169,3 +185,48 @@ class IndexView:
             if nid.startswith(prefix) and "." not in nid[len(prefix):]
         ]
         return out
+
+    # ── inline callbacks (transparent nodes) ─────────────────────────
+
+    def is_inline_callback(self, node_id: str) -> bool:
+        meta = self.nodes.get(node_id)
+        return bool(meta) and meta.get("type") == "Function" and is_inline_callback_name(meta.get("name"))
+
+    def named_ancestor(self, node_id: str) -> str:
+        """``node_id`` itself when it is a named definition, otherwise the nearest
+        enclosing definition that is not an inline callback (the file as a last resort)."""
+        cur = node_id
+        while cur and self.is_inline_callback(cur):
+            cur = self.container_of(cur) or self.file_of(cur)
+        return cur or node_id
+
+    def display_name(self, node_id: str) -> str:
+        """Qualified name without inline-callback segments: ``App.callback_L85_C13.checkBackend``
+        is shown as ``App.checkBackend`` (the id keeps the full path)."""
+        qual = self.qualified_name(node_id)
+        if self.type_of(node_id) not in DOTTED_TYPES or "." not in qual or self.is_inline_callback(node_id):
+            return qual
+        return ".".join(seg for seg in qual.split(".") if not is_inline_callback_name(seg)) or qual
+
+    def visible_members(self, node_id: str) -> list[str]:
+        """Direct named members, with members of inline callbacks hoisted in place."""
+        out: list[str] = []
+        for member in self.members_of(node_id):
+            if self.is_inline_callback(member):
+                out.extend(self.visible_members(member))
+            else:
+                out.append(member)
+        return out
+
+    def inline_callbacks_under(self, node_id: str) -> list[str]:
+        """Inline callbacks absorbed by ``node_id``: nested callbacks down to (not
+        through) the next named definition."""
+        out: list[str] = []
+        for member in self.members_of(node_id):
+            if self.is_inline_callback(member):
+                out.append(member)
+                out.extend(self.inline_callbacks_under(member))
+        return out
+
+    def named_symbols_in_file(self, file_path: str) -> list[str]:
+        return [n for n in self.symbols_in_file(file_path) if not self.is_inline_callback(n)]

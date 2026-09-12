@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .index_view import IndexView, lines_span
+from .index_view import IndexView, is_inline_callback_name, lines_span
 
 MAX_DOCSTRING = 240
 MAX_SIGNATURE = 200
@@ -45,7 +45,7 @@ def brief_record(view: IndexView, node_id: str) -> dict:
     rec: dict[str, Any] = {
         "id": node_id,
         "kind": meta.get("type", "Unknown"),
-        "name": view.qualified_name(node_id),
+        "name": view.display_name(node_id),
         "file": view.file_of(node_id),
     }
     span = lines_span(meta)
@@ -64,6 +64,8 @@ def symbol_record(view: IndexView, node_id: str) -> dict:
     kind = rec["kind"]
 
     container = view.container_of(node_id)
+    if container:
+        container = view.named_ancestor(container)  # skip enclosing inline callbacks
     if container and container != rec["file"]:
         rec["container"] = container
 
@@ -127,12 +129,13 @@ def symbol_record(view: IndexView, node_id: str) -> dict:
 
 
 def compact_entry(view: IndexView, node_id: str, depth: int | None = None) -> str:
-    """One-line ``<qualified> [<Kind>] L<start>-<end>`` used in grouped listings.
+    """One-line ``<name> [<Kind>] L<start>-<end>`` used in grouped listings.
 
-    The node ID is always ``<file>:<qualified>``; the file is the group key.
+    ``<name>`` is the display name (inline-callback segments removed); the file
+    is the group key and ``lookup_symbol``/``impact`` accept ``<file>:<name>``.
     """
     meta = view.get(node_id) or {}
-    parts = [view.qualified_name(node_id), f"[{meta.get('type', 'Unknown')}]"]
+    parts = [view.display_name(node_id), f"[{meta.get('type', 'Unknown')}]"]
     span = lines_span(meta)
     if span and meta.get("type") not in ("File", "Folder"):
         parts.append(f"L{span}")
@@ -172,7 +175,47 @@ def import_statements(meta: dict) -> list[str]:
     lines = meta.get("import_lines") or {}
     if isinstance(lines, dict):
         chosen.sort(key=lambda i: (lines.get(i, 10 ** 9), i))
-    return [_truncate(item, MAX_INLINE_TEXT) or "" for item in chosen]
+    # Multi-line `import { a,\n b,\n } from 'x'` statements collapse to one line.
+    return [_truncate(" ".join(item.split()).replace(", }", " }"), MAX_INLINE_TEXT) or "" for item in chosen]
+
+
+def export_entries(meta: dict) -> list[str]:
+    """Exported names of a file, one compact entry each.
+
+    ``App`` (local), ``App as default`` (aliased), ``a as b from ./x`` /
+    ``* from ./y`` (re-exports). Prefers the structured JS export map (covers
+    CommonJS and star re-exports) and falls back to the generic statement list.
+    """
+    out: list[str] = []
+    js = meta.get("javascript_exports")
+    if isinstance(js, dict) and js:
+        for exported, info in js.items():
+            if exported == "*":
+                out.extend(f"* from {s.get('source')}" for s in (info if isinstance(info, list) else [])
+                           if isinstance(s, dict) and s.get("source"))
+                continue
+            if not isinstance(info, dict):
+                continue
+            if info.get("kind") == "reexport":
+                imported = info.get("imported") or exported
+                head = exported if imported == exported else f"{imported} as {exported}"
+                out.append(f"{head} from {info.get('source')}" if info.get("source") else head)
+            else:
+                local = str(info.get("local") or exported)
+                synthetic = local.startswith("anonymous_L") or local == exported
+                out.append(exported if synthetic else f"{local} as {exported}")
+    else:
+        for item in meta.get("exports") or []:
+            if not isinstance(item, dict):
+                out.append(str(item))
+                continue
+            source = item.get("source")
+            for entry in item.get("names") or []:
+                name = entry.get("name") if isinstance(entry, dict) else entry
+                alias = entry.get("alias") if isinstance(entry, dict) else None
+                text = f"{name} as {alias}" if alias and alias != name else str(name)
+                out.append(f"{text} from {source}" if source else text)
+    return [_truncate(e, MAX_INLINE_TEXT) or "" for e in dict.fromkeys(out)]
 
 
 # Call names that carry no dependency information for an agent: language
@@ -183,7 +226,9 @@ _JS_GLOBALS = frozenset({"require", "setTimeout", "setInterval", "clearTimeout",
                          "parseInt", "parseFloat", "isNaN", "encodeURIComponent", "decodeURIComponent",
                          "String", "Number", "Boolean", "Array", "Object", "Error", "Promise", "Date", "Map", "Set"})
 _NOISE_RECEIVERS = frozenset({"console", "JSON", "Math", "Object", "Array", "Promise", "Number",
-                              "String", "Date", "logger", "logging"})
+                              "String", "Date", "logger", "logging",
+                              # platform globals, not code dependencies
+                              "process", "window", "document", "navigator", "globalThis"})
 # Deliberately excludes verbs that are meaningful on ORMs/HTTP clients
 # (get, update, add, find, count, insert, remove, ...).
 _COMMON_METHODS = frozenset({
@@ -198,6 +243,8 @@ _COMMON_METHODS = frozenset({
 def is_noise_call(call: str) -> bool:
     call = call.strip()
     if "." not in call:
-        return call in _PY_BUILTINS or call in _JS_GLOBALS
+        # `callback_L12_C5`: the parser's handle for an inline literal passed as
+        # an argument; it is wiring, not a dependency.
+        return call in _PY_BUILTINS or call in _JS_GLOBALS or is_inline_callback_name(call)
     receiver, tail = call.split(".", 1)[0], call.rsplit(".", 1)[-1]
     return receiver in _NOISE_RECEIVERS or tail in _COMMON_METHODS

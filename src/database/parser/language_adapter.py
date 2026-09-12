@@ -236,7 +236,7 @@ SUPPORTED_EXTENSIONS = tuple(sorted(set(LANGUAGE_ADAPTERS) | set(NON_CODE_EXTENS
 # fields, nested-definition indexing, ...). Persisted indexes built by an older
 # parser are then detected as stale instead of silently answering from a graph
 # that lacks the new nodes.
-PARSER_SCHEMA_VERSION = "contextual-js-ts-v1"
+PARSER_SCHEMA_VERSION = "contextual-js-ts-v2"
 
 
 def compute_index_fingerprint() -> str:

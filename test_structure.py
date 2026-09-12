@@ -244,7 +244,8 @@ class TestImpact:
         assert out["ok"]
         m = out["meta"]
         assert m["direct"] == 1 and m["total"] == 3 and m["files"] == 2
-        assert out["direct_callers"] == ["src/services.py:persist"]
+        # Direct neighbours are the depth=1 entries; no duplicate list, no legend.
+        assert "direct_callers" not in out and "entry_format" not in m
         assert out["affected"] == {
             "src/api.py": ["SalesAPI.create_sale [Function] L10-20 depth=3",
                            "create_sale [Function] L50-60 depth=2"],
@@ -274,7 +275,8 @@ class TestImpact:
     def test_callees_direction(self, structure):
         out = structure.impact("SalesAPI.create_sale", depth=5, direction="callees")
         assert out["meta"]["direction"] == "callees"
-        assert out["direct_callees"] == ["src/api.py:create_sale"]
+        assert out["meta"]["direct"] == 1
+        assert out["affected"]["src/api.py"] == ["create_sale [Function] L50-60 depth=1"]
         assert set(out["affected"]) == {"src/api.py", "src/services.py", "src/db.py"}
 
     def test_invalid_direction_and_depth_clamping(self, structure):
@@ -299,7 +301,7 @@ class TestImpact:
         assert out["meta"]["truncated"] is True
         assert out["meta"]["total"] == MAX_IMPACT_NODES
         assert out["meta"]["direct"] == MAX_IMPACT_NODES + 50
-        assert out["direct_callers_omitted"] == MAX_IMPACT_NODES
+        assert sum(len(v) for v in out["affected"].values()) == MAX_IMPACT_NODES
         assert any("stopped" in w for w in out["meta"]["warnings"])
 
     def test_exact_node_limit_is_not_reported_as_truncated(self):
@@ -389,12 +391,153 @@ class TestCodeMap:
         assert file_record["frameworks_omitted"] == 10
 
 
+# ── inline callbacks are transparent ──────────────────────────────────
+
+@pytest.fixture
+def react_client():
+    """Graph shape the parser produces for a React component:
+
+        function App() {
+          useEffect(() => {                       // App.callback_L5_C13
+            const checkBackend = async () => { ping(); };
+            const t = setInterval(() => tick());  // ...callback_L10_C7
+          });
+          const handleSend = useCallback((text) => {
+            items.forEach((i) => send(i));        // handleSend.callback_L22_C9
+          });
+          return <Header />;
+        }
+    """
+    c = FakeClient()
+    c.add("web", "Folder")
+    c.add("web/App.tsx", "File", lines={"start": 1, "end": 40}, imports=["react"],
+          javascript_exports={"App": {"kind": "local", "local": "App"},
+                              "default": {"kind": "local", "local": "App"}})
+    c.add("web/App.tsx:App", "Function", lines={"start": 1, "end": 40}, signature="function App()",
+          calls=["useEffect", "callback_L5_C13", "Header", "setVitals", "renderer.destroy", "process.exit"],
+          javascript_shadowed_names=["vitals", "setVitals", "renderer"])
+    c.add("web/App.tsx:App.callback_L5_C13", "Function", lines={"start": 5, "end": 12}, signature="() =>",
+          calls=["checkBackend", "setInterval", "callback_L10_C7"])
+    c.add("web/App.tsx:App.callback_L5_C13.checkBackend", "Function", lines={"start": 6, "end": 9},
+          signature="checkBackend = async () =>", calls=["ping"])
+    c.add("web/App.tsx:App.callback_L5_C13.callback_L10_C7", "Function", lines={"start": 10, "end": 10},
+          calls=["tick"])
+    c.add("web/App.tsx:App.handleSend", "Function", lines={"start": 20, "end": 30},
+          signature="handleSend = useCallback((text) =>",
+          calls=["items.forEach", "callback_L22_C9", "setVitals", "text.trim", "analytics.track"],
+          javascript_shadowed_names=["text"])
+    c.add("web/App.tsx:App.handleSend.callback_L22_C9", "Function", lines={"start": 22, "end": 22},
+          calls=["send"])
+    c.add("web/Header.tsx", "File").add("web/Header.tsx:Header", "Function", lines={"start": 1, "end": 5})
+    c.add("web/api.ts", "File")
+    for name, line in (("ping", 1), ("tick", 5), ("send", 9)):
+        c.add(f"web/api.ts:{name}", "Function", lines={"start": line, "end": line + 2})
+    for child in [n for n in c.nodes if ":" in n]:
+        parent = f"{child.rsplit('.', 1)[0]}" if "." in child.split(":", 1)[1] else child.split(":", 1)[0]
+        c.contains_edge(child, parent)
+    c.call("web/App.tsx:App", "web/App.tsx:App.callback_L5_C13")
+    c.call("web/App.tsx:App", "web/Header.tsx:Header")
+    c.call("web/App.tsx:App.callback_L5_C13", "web/App.tsx:App.callback_L5_C13.checkBackend")
+    c.call("web/App.tsx:App.callback_L5_C13", "web/App.tsx:App.callback_L5_C13.callback_L10_C7")
+    c.call("web/App.tsx:App.callback_L5_C13.checkBackend", "web/api.ts:ping")
+    c.call("web/App.tsx:App.callback_L5_C13.callback_L10_C7", "web/api.ts:tick")
+    c.call("web/App.tsx:App.handleSend", "web/App.tsx:App.handleSend.callback_L22_C9")
+    c.call("web/App.tsx:App.handleSend.callback_L22_C9", "web/api.ts:send")
+    return c
+
+
+class TestInlineCallbacks:
+    def test_code_map_hides_callbacks_and_hoists_named_children(self, react_client):
+        out = CodeStructure(react_client).map("web/App.tsx")
+        assert "callback_L" not in str(out)
+        assert out["meta"]["symbols"] == 3 and out["meta"]["inline_callbacks"] == 3
+        app = out["symbols"][0]
+        assert app["name"] == "App"
+        assert [m["name"] for m in app["members"]] == ["checkBackend", "handleSend"]
+        assert "members" not in app["members"][0]
+        assert out["exports"] == ["App", "App as default"]
+
+    def test_directory_counts_exclude_callbacks(self, react_client):
+        out = CodeStructure(react_client).map("web")
+        files = {f["path"]: f for f in out["files"]}
+        assert files["web/App.tsx"]["symbols"] == {"Function": 3}
+        assert files["web/App.tsx"]["top_level"] == "App"
+        assert out["meta"]["symbols"] == 7
+
+    def test_lookup_attributes_callback_calls_to_the_definition(self, react_client):
+        out = CodeStructure(react_client).lookup("App")
+        rel = out["relationships"]
+        assert rel["callees"] == ["web/Header.tsx:Header", "web/App.tsx:App.callback_L5_C13.checkBackend",
+                                  "web/api.ts:tick"]
+        assert rel["members"] == ["web/App.tsx:App.callback_L5_C13.checkBackend", "web/App.tsx:App.handleSend"]
+        assert "related" not in rel
+        # `callback_L*` is wiring, setInterval/process are globals, setVitals and
+        # renderer are local bindings (state setter / hook result); the hook remains.
+        assert rel["unresolved_calls"] == ["useEffect"]
+
+    def test_unresolved_calls_skip_bindings_of_enclosing_scopes(self, react_client):
+        rel = CodeStructure(react_client).lookup("handleSend")["relationships"]
+        # setVitals is bound in App (the container), text is handleSend's own parameter.
+        assert rel["unresolved_calls"] == ["analytics.track"]
+        assert rel["callees"] == ["web/api.ts:send"]
+
+    def test_hoisted_definition_shows_named_container_and_display_name(self, react_client):
+        out = CodeStructure(react_client).lookup("checkBackend")
+        sym = out["symbol"]
+        assert sym["id"] == "web/App.tsx:App.callback_L5_C13.checkBackend"
+        assert sym["name"] == "App.checkBackend" and sym["container"] == "web/App.tsx:App"
+        assert out["relationships"]["callers"] == ["web/App.tsx:App"]
+        assert out["relationships"]["callees"] == ["web/api.ts:ping"]
+
+    def test_display_name_resolves(self, react_client):
+        view = IndexView(react_client)
+        for query in ("App.checkBackend", "App.tsx:App.checkBackend", "web/App.tsx:App.checkBackend"):
+            res = resolve_symbol(view, query)
+            assert res.status == RESOLVED, query
+            assert res.node_id == "web/App.tsx:App.callback_L5_C13.checkBackend"
+
+    def test_impact_counts_hops_between_named_definitions_only(self, react_client):
+        s = CodeStructure(react_client)
+        callers = s.impact("ping", depth=1)
+        assert callers["affected"] == {"web/App.tsx": ["App.checkBackend [Function] L6-9 depth=1"]}
+        assert callers["meta"]["more_beyond_depth"] is True
+        assert s.impact("ping", depth=2)["affected"]["web/App.tsx"] == [
+            "App [Function] L1-40 depth=2", "App.checkBackend [Function] L6-9 depth=1"]
+        callees = s.impact("App", depth=1, direction="callees")
+        assert callees["meta"]["direct"] == 3 and callees["meta"]["total"] == 3
+        assert callees["affected"] == {
+            "web/App.tsx": ["App.checkBackend [Function] L6-9 depth=1"],
+            "web/Header.tsx": ["Header [Function] L1-5 depth=1"],
+            "web/api.ts": ["tick [Function] L5-7 depth=1"],
+        }
+        # handleSend is defined, not called, by App: its callee is not App's.
+        assert "send" not in str(callees["affected"])
+        assert s.impact("send", depth=1)["affected"] == {"web/App.tsx": ["App.handleSend [Function] L20-30 depth=1"]}
+
+
+def test_export_entries_render_compactly():
+    from src.structure.records import export_entries
+    js = {"javascript_exports": {
+        "c": {"kind": "reexport", "source": "./x", "imported": "c"},
+        "b": {"kind": "reexport", "source": "./x", "imported": "a"},
+        "*": [{"kind": "star", "source": "./y"}],
+        "bee": {"kind": "local", "local": "b"},
+        "default": {"kind": "local", "local": "anonymous_L1"},
+    }}
+    assert export_entries(js) == ["c from ./x", "a as b from ./x", "* from ./y", "b as bee", "default"]
+    generic = {"exports": [{"default": False, "names": [{"name": "a", "alias": None}, {"name": "b", "alias": "bee"}],
+                            "source": None},
+                           {"default": True, "names": [{"name": "default", "alias": None}], "source": None}]}
+    assert export_entries(generic) == ["a", "b as bee", "default"]
+    assert export_entries({}) == []
+
+
 # ── record helpers ────────────────────────────────────────────────────
 
 def test_unresolved_calls_hide_builtins_but_keep_dependencies():
     from src.structure.records import is_noise_call
     for noise in ("len", "str", "isinstance", "norm.rstrip", "items.append", "console.log",
-                  "JSON.stringify", "logger.info", "require", "arr.map"):
+                  "JSON.stringify", "logger.info", "require", "arr.map", "callback_L12_C5"):
         assert is_noise_call(noise), noise
     for real in ("db.update", "axios.get", "router.get", "json.dumps", "fetch", "collection.find",
                  "self.save", "super().execute", "Repo"):
@@ -409,6 +552,8 @@ def test_import_statements_prefer_full_statements_in_source_order():
     }
     assert import_statements(meta) == ["from x import y", "import os"]
     assert import_statements({"imports": ["@trpc/server", "react"]}) == ["@trpc/server", "react"]
+    multi = {"imports": ["import type {\n  A,\n  B,\n} from './t';", "./t"]}
+    assert import_statements(multi) == ["import type { A, B } from './t';"]
 
 
 # ── health meta ───────────────────────────────────────────────────────
