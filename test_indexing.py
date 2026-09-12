@@ -910,7 +910,7 @@ def test_typed_edges_survive_snapshot_and_repopulation(isolated_temp_dir):
         restored.repopulate_edges()
         restored.build()
         assert restored.get_callees(caller) == [callee]
-        assert CodeStructure(restored, ws).impact(callee)["direct_callers"] == [caller]
+        assert CodeStructure(restored, ws).impact(callee)["affected"] == {"caller.py": ["run [Function] L1-2 depth=1"]}
     finally:
         restored.close()
 
@@ -926,7 +926,7 @@ def test_warm_start_is_used_only_when_nothing_changed(indexer):
     summary = second.initial_scan()
     assert summary["warm_start"] is True
     assert summary["nodes"] == first_nodes
-    assert CodeStructure(second.client, indexer.ws).impact("alpha")["direct_callers"] == ["b.py:beta"]
+    assert CodeStructure(second.client, indexer.ws).impact("alpha")["affected"] == {"b.py": ["beta [Function] L3-4 depth=1"]}
 
     # A changed file invalidates the warm start and the new symbol is indexed.
     _write(indexer.ws, {"a.py": "def alpha():\n    return 1\n\ndef gamma():\n    return 2\n"})
@@ -1015,7 +1015,7 @@ def test_drain_applies_events_and_reports_failures(indexer):
     assert index.drain_pending_events() == 1
     assert index.sync_errors == set()
     assert structure.lookup("new_symbol")["status"] == "resolved"
-    assert structure.impact("alpha")["direct_callers"] == ["new.py:new_symbol"]
+    assert structure.impact("alpha")["affected"] == {"new.py": ["new_symbol [Function] L3-4 depth=1"]}
 
     # Deleting the file removes its symbols and the caller edge.
     os.remove(new_file)
@@ -1263,3 +1263,82 @@ def test_possible_callers_recover_untyped_receiver_calls_without_the_decoy(index
     decoy = structure.lookup("WebSocketRouter.add_route")["relationships"]
     assert decoy["callers"] == ["fx/websocket.py:WebSocketRouter.route.decorator"]
     assert decoy["possible_callers"] == rel["possible_callers"]
+
+
+def test_react_component_outline_hides_inline_callbacks_and_keeps_wrapped_names(indexer):
+    """`useCallback`/`memo`-wrapped functions keep their binding name (and own
+    their body calls); anonymous inline callbacks stay in the graph for scope
+    precision but are transparent in every tool."""
+    index, structure = indexer({
+        "src/api.ts": "export function ping() { return 1; }\nexport function send(t: string) { return t; }\n",
+        "src/Header.tsx": "export function Header() { return <h1/>; }\n",
+        "src/App.tsx": """
+import React, { useEffect, useCallback, memo } from 'react';
+import { ping, send } from './api';
+import { Header } from './Header';
+
+export const Badge = memo((props: { n: number }) => {
+  ping();
+  return <span>{props.n}</span>;
+});
+
+export function App() {
+  useEffect(() => {
+    const checkBackend = async () => { await ping(); };
+    checkBackend();
+    const t = setInterval(() => ping(), 1000);
+    return () => clearInterval(t);
+  }, []);
+
+  const executeDirective = useCallback(async (prompt: string) => {
+    await send(prompt);
+  }, []);
+
+  const handleSend = useCallback((text: string) => {
+    executeDirective(text);
+  }, [executeDirective]);
+
+  return <Header />;
+}
+""",
+    })
+    client = index.client
+    # Graph: wrapped bindings are named nodes and own their body calls.
+    assert client.get_callees("src/App.tsx:Badge") == ["src/api.ts:ping"]
+    assert client.get_callees("src/App.tsx:App.executeDirective") == ["src/api.ts:send"]
+    assert client.get_callees("src/App.tsx:App.handleSend") == ["src/App.tsx:App.executeDirective"]
+    # Inline callbacks remain their own scopes in the graph...
+    callbacks = [n for n, m in client.get_all_metadata().items() if str(m.get("name", "")).startswith("callback_L")]
+    assert len(callbacks) == 3
+
+    # ...but no tool shows them.
+    outline = structure.map("src/App.tsx")
+    assert "callback_L" not in str(outline)
+    assert outline["meta"]["symbols"] == 5 and outline["meta"]["inline_callbacks"] == 3
+    assert outline["exports"] == ["Badge", "App"]
+    app = next(s for s in outline["symbols"] if s["name"] == "App")
+    members = {m["name"]: m for m in app["members"]}
+    assert list(members) == ["checkBackend", "executeDirective", "handleSend"]
+    assert members["executeDirective"]["signature"].startswith("executeDirective = useCallback(async (prompt: string)")
+    assert members["executeDirective"]["is_async"] is True
+
+    rel = structure.lookup("App")["relationships"]
+    assert rel["callees"] == ["src/Header.tsx:Header", "src/App.tsx:App.callback_L12_C13.checkBackend",
+                              "src/api.ts:ping"]
+    assert rel["members"] == ["src/App.tsx:App.callback_L12_C13.checkBackend", "src/App.tsx:App.executeDirective",
+                              "src/App.tsx:App.handleSend"]
+    listed = rel["callees"] + rel["members"] + rel.get("related", []) + rel["unresolved_calls"]
+    assert not any(n.rsplit(".", 1)[-1].startswith("callback_L") for n in listed)  # no callback *entries*
+    assert rel["unresolved_calls"] == ["useEffect"]
+
+    hoisted = structure.lookup("App.checkBackend")
+    assert hoisted["status"] == "resolved"
+    assert hoisted["symbol"]["name"] == "App.checkBackend" and hoisted["symbol"]["container"] == "src/App.tsx:App"
+
+    callers = structure.impact("ping", depth=1)
+    assert callers["affected"] == {"src/App.tsx": ["Badge [Function] L6-9 depth=1",
+                                                   "App [Function] L11-28 depth=1",
+                                                   "App.checkBackend [Function] L13-13 depth=1"]}
+    assert structure.impact("send", depth=5)["affected"] == {
+        "src/App.tsx": ["App.executeDirective [Function] L19-21 depth=1",
+                        "App.handleSend [Function] L23-25 depth=2"]}

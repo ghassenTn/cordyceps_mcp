@@ -64,7 +64,10 @@ def code_map(path: str = ".", depth: MapDepth = 1) -> str:
     Directory: immediate sub-folders and files with file/symbol counts and the
     top-level definition names of each file. ``depth`` (1-4) expands nested
     folders. File: the definition tree (classes, methods, functions, nested
-    defs, routes, declarations) with line ranges and signatures, plus imports.
+    defs, routes, declarations) with line ranges and signatures, plus imports
+    and exports. Anonymous inline callbacks are not listed (only counted in
+    ``meta.inline_callbacks``); functions defined inside them appear under
+    the enclosing definition.
 
     Use it first to orient in an unfamiliar codebase, then ``lookup_symbol``
     for a specific definition. Paths are workspace-relative ("." = root);
@@ -100,17 +103,19 @@ def impact(symbol: str, depth: ImpactDepth = DEFAULT_IMPACT_DEPTH,
 
     ``direction='callers'`` (default) answers "what could break if I change
     this"; ``'callees'`` answers "what does this rely on". ``depth`` is the
-    number of call hops to follow (default 2, max 25). Results are grouped by
-    file with the hop distance of each entry; ``meta.direct`` vs
-    ``meta.total`` separates direct from transitive, and
+    number of call hops to follow (default 2, max 25). ``affected`` groups
+    entries by file as ``<name> [<Kind>] L<start>-<end> depth=<hops>``
+    (``depth=1`` = direct; the node id is ``<file>:<name>``). ``meta.direct``
+    vs ``meta.total`` separates direct from transitive, and
     ``meta.more_beyond_depth`` / ``meta.truncated`` say when the picture is
     incomplete. Only executable edges (calls, route/HTTP links) are followed,
-    never imports or containment. With ``direction='callers'``,
-    ``possible_callers`` adds symbols that call this name through an untyped
-    receiver (not linked in the graph, so absent from ``affected``): read
-    those call sites to confirm or rule them out. With ``'callees'``,
-    ``unresolved_callees`` lists what the target calls that could not be
-    linked.
+    never imports or containment. Inline callbacks (``items.map(x => ...)``)
+    are transparent: their calls count as the enclosing definition's.
+    With ``direction='callers'``, ``possible_callers`` adds symbols that call
+    this name through an untyped receiver (not linked in the graph, so absent
+    from ``affected``): read those call sites to confirm or rule them out.
+    With ``'callees'``, ``unresolved_callees`` lists what the target calls
+    that could not be linked.
     """
     return _answer("impact", lambda s: s.impact(symbol, depth, direction))
 

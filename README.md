@@ -25,7 +25,10 @@ Outline of a directory or a file.
   count, symbol counts by kind, top-level definition names). `depth` (1–4) expands nested
   folders.
 * **File**: the definition tree — classes with their methods, functions with nested
-  definitions, routes, declarations — each with line range and signature, plus imports.
+  definitions, routes, declarations — each with line range and signature, plus imports
+  and exports. Anonymous inline callbacks are not listed (counted in
+  `meta.inline_callbacks`); functions defined inside them appear under the
+  enclosing definition.
 
 ```yaml
 symbols:
@@ -58,13 +61,19 @@ imports or containment), grouped by file with the hop distance of every entry.
 
 ```yaml
 meta: {direct: 2, total: 3, files: 2, truncated: false, more_beyond_depth: false}
-direct_callers: [src/structure/resolver.py:resolve_symbol, ...]
 affected:
   src/structure/resolver.py:
   - resolve_symbol [Function] L40-70 depth=1
   src/structure/service.py:
   - CodeStructure.lookup [Function] L92-112 depth=2
 ```
+
+Direct neighbours are the `depth=1` entries of `affected` (no separate list).
+With `direction="callers"`, `possible_callers` adds by-name candidates the resolver
+could not link (untyped receivers — verify the call site); with `"callees"`,
+`unresolved_callees` lists calls that could not be resolved. Anonymous inline
+callbacks (`items.map(x => ...)`) are transparent everywhere: their calls count
+as the enclosing definition's.
 
 `direction="callees"` answers the opposite question ("what does this rely on").
 `meta.more_beyond_depth` and `meta.truncated` say explicitly when the picture is incomplete.

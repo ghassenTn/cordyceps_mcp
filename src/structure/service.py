@@ -23,7 +23,7 @@ import os
 from typing import Any, Callable
 
 from .index_view import IndexView, SYMBOL_TYPES, DOTTED_TYPES, is_under, lines_span, normalize_path
-from .records import (brief_record, bounded, bounded_texts, compact_entry, group_by_file,
+from .records import (brief_record, bounded, bounded_texts, compact_entry, export_entries, group_by_file,
                       import_statements, is_noise_call, symbol_record)
 from .resolver import AMBIGUOUS, NOT_FOUND, Resolution, resolve_symbol
 
@@ -41,7 +41,6 @@ MAX_IMPACT_DEPTH = 25
 DEFAULT_IMPACT_DEPTH = 2
 
 CALLERS, CALLEES = "callers", "callees"
-ENTRY_FORMAT = "<qualified_name> [<Kind>] L<start>-<end>; node id = <file>:<qualified_name>"
 # Languages whose call edges are resolved with import/scope/receiver context.
 # Python is resolved in Rust; JS/TS use the conservative Python-side resolver.
 # Extend this only when a language gains equivalent contextual semantics.
@@ -130,9 +129,9 @@ class CodeStructure:
         raw_neighbours = self.client.get_callers if direction == CALLERS else self.client.get_callees
 
         def neighbours(node_id: str) -> list[str]:
-            return _unique(raw_neighbours(node_id))
+            return self._flat_neighbours(view, node_id, raw_neighbours)
 
-        direct = [n for n in neighbours(target) if n != target]
+        direct = neighbours(target)
         depths, truncated, beyond = self._bfs(target, neighbours, depth)
         affected_ids = list(depths)
         # Callers the resolver could not link (untyped receivers) are recovered
@@ -154,7 +153,6 @@ class CodeStructure:
             "files": len({view.file_of(n) for n in affected_ids}),
             "truncated": truncated,
             "more_beyond_depth": beyond,
-            "entry_format": ENTRY_FORMAT,
         })
         if direction == CALLERS:
             meta["possible"] = len(possible)
@@ -184,16 +182,15 @@ class CodeStructure:
         if warnings:
             meta["warnings"] = warnings
 
+        # Direct neighbours are the ``depth=1`` entries of ``affected``; they are
+        # not repeated as a separate list.
         out = {
             "ok": True,
             "tool": "impact",
             "target": brief_record(view, target),
             "meta": meta,
-            f"direct_{direction}": direct[:MAX_RELATED],
             "affected": group_by_file(view, affected_ids, depths),
         }
-        if len(direct) > MAX_RELATED:
-            out[f"direct_{direction}_omitted"] = len(direct) - MAX_RELATED
         if possible:
             head, omitted = bounded(possible, MAX_POSSIBLE_CALLERS)
             out["possible_callers"] = head
@@ -217,7 +214,7 @@ class CodeStructure:
             "kind": "directory",
             "folders": tree.pop("_folder_count"),
             "files": len(files),
-            "symbols": sum(len(view.symbols_in_file(fp)) for fp in files),
+            "symbols": sum(len(view.named_symbols_in_file(fp)) for fp in files),
             "truncated": budget[1],
         })
         if meta["truncated"]:
@@ -242,7 +239,7 @@ class CodeStructure:
         entry: dict[str, Any] = {
             "path": prefix or ".",
             "files_count": len(files),
-            "symbols_count": sum(len(view.symbols_in_file(fp)) for fp in files),
+            "symbols_count": sum(len(view.named_symbols_in_file(fp)) for fp in files),
         }
         folder_count = len(children)
         folders = []
@@ -261,7 +258,7 @@ class CodeStructure:
                 folders.append({
                     "path": sub_prefix,
                     "files_count": len(sub_files),
-                    "symbols_count": sum(len(view.symbols_in_file(fp)) for fp in sub_files),
+                    "symbols_count": sum(len(view.named_symbols_in_file(fp)) for fp in sub_files),
                 })
         if folders:
             entry["folders"] = folders
@@ -280,7 +277,7 @@ class CodeStructure:
 
     def _file_summary(self, view: IndexView, fp: str) -> dict:
         meta = view.get(view.file_node(fp)) or {}
-        symbols = view.symbols_in_file(fp)
+        symbols = view.named_symbols_in_file(fp)
         summary: dict[str, Any] = {"path": fp}
         lines = meta.get("lines") or {}
         if isinstance(lines, dict) and lines.get("end"):
@@ -300,7 +297,8 @@ class CodeStructure:
     def _map_file(self, view: IndexView, rel: str) -> dict:
         file_id = view.file_node(rel)
         meta_node = view.get(file_id) or {}
-        symbols = view.symbols_in_file(rel)
+        all_symbols = view.symbols_in_file(rel)
+        symbols = view.named_symbols_in_file(rel)
         budget = [MAX_MAP_ENTRIES, False]
         tree = []
         for nid in symbols:
@@ -316,18 +314,20 @@ class CodeStructure:
             "kind": "file",
             "line_count": lines.get("end") if isinstance(lines, dict) else None,
             "symbols": len(symbols),
-            "truncated": budget[1],
         })
+        if len(all_symbols) > len(symbols):
+            # Complexity signal only; the callbacks themselves are not listed.
+            meta["inline_callbacks"] = len(all_symbols) - len(symbols)
+        meta["truncated"] = budget[1]
         out: dict[str, Any] = {"ok": True, "tool": "code_map", "meta": meta}
         imports, omitted = bounded(import_statements(meta_node), MAX_IMPORTS)
         if imports:
             out["imports"] = imports
             if omitted:
                 out["imports_omitted"] = omitted
-        exports = meta_node.get("exports")
-        if isinstance(exports, list) and exports:
-            head, omitted = bounded_texts(exports, MAX_IMPORTS)
-            out["exports"] = head
+        exports, omitted = bounded(export_entries(meta_node), MAX_IMPORTS)
+        if exports:
+            out["exports"] = exports
             if omitted:
                 out["exports_omitted"] = omitted
         out["symbols"] = tree
@@ -374,7 +374,9 @@ class CodeStructure:
                 node["base_classes_omitted"] = omitted
         if meta.get("is_async"):
             node["is_async"] = True
-        members = [self._symbol_tree(view, m, budget) for m in view.members_of(nid)]
+        # Definitions nested in inline callbacks are shown under the enclosing
+        # named definition; the callbacks themselves are not entries.
+        members = [self._symbol_tree(view, m, budget) for m in view.visible_members(nid)]
         members = [m for m in members if m]
         if members:
             node["members"] = members
@@ -383,11 +385,11 @@ class CodeStructure:
     # ── lookup internals ─────────────────────────────────────────────
 
     def _symbol_relationships(self, view: IndexView, node_id: str) -> dict:
-        callers = [n for n in _unique(self.client.get_callers(node_id)) if n != node_id]
-        callees = [n for n in _unique(self.client.get_callees(node_id)) if n != node_id]
+        callers = self._flat_neighbours(view, node_id, self.client.get_callers)
+        callees = self._flat_neighbours(view, node_id, self.client.get_callees)
         caller_set, callee_set = set(callers), set(callees)
         container = view.container_of(node_id)
-        members = view.members_of(node_id)
+        members = view.visible_members(node_id)
         member_set = set(members)
 
         own_file = view.file_of(node_id)
@@ -395,7 +397,8 @@ class CodeStructure:
                          if n not in caller_set and n not in member_set and n != node_id]
         structural_out = [n for n in _unique(self.client.get_dependencies(node_id))
                           if n not in callee_set and n not in (container, own_file, node_id)]
-        related = _unique(n for n in structural_in + structural_out if n not in member_set)
+        related = _unique(n for n in structural_in + structural_out
+                          if n not in member_set and not view.is_inline_callback(n))
 
         rel: dict[str, Any] = {}
         rel.update(self._bounded_list("callers", callers))
@@ -417,6 +420,19 @@ class CodeStructure:
             if omitted:
                 rel["unresolved_calls_omitted"] = omitted
         return rel
+
+    def _flat_neighbours(self, view: IndexView, node_id: str, raw: Callable[[str], list]) -> list[str]:
+        """Executable neighbours with inline callbacks made transparent.
+
+        A definition's callees include those of the inline callbacks it contains
+        (``useEffect(() => { checkBackend(); })`` makes ``checkBackend`` a callee
+        of the component), and any inline-callback neighbour is replaced by its
+        nearest named ancestor. The node itself is never reported.
+        """
+        sources = [node_id, *view.inline_callbacks_under(node_id)]
+        skip = {node_id, view.named_ancestor(node_id)}
+        return _unique(named for src in sources for named in map(view.named_ancestor, raw(src) or ())
+                       if named not in skip)
 
     def _file_relationships(self, view: IndexView, file_id: str) -> dict:
         symbols = view.symbols_in_file(file_id)
@@ -464,18 +480,32 @@ class CodeStructure:
     def _unresolved_calls(self, view: IndexView, node_id: str, callees: list[str]) -> list[str]:
         """Raw call names with no resolved callee. Conservative: a call is
         considered resolved when any callee's name or qualified name matches
-        its last segment."""
-        raw = (view.get(node_id) or {}).get("calls") or []
-        if isinstance(raw, str):
-            raw = [raw]
+        its last segment. Calls made inside the node's inline callbacks count
+        as its own; calls to names bound in the enclosing scopes (parameters,
+        local variables such as React state setters) are omitted because they
+        are not dependencies of the definition."""
+        raw: list = []
+        scope_sources = [node_id, *view.inline_callbacks_under(node_id)]
+        for src in scope_sources:
+            calls = (view.get(src) or {}).get("calls") or []
+            raw.extend([calls] if isinstance(calls, str) else calls)
+        local_names: set[str] = set()
+        cur: str | None = node_id
+        while cur and view.type_of(cur) in SYMBOL_TYPES:
+            for src in (cur, *(view.inline_callbacks_under(cur) if cur == node_id else ())):
+                local_names.update(str(n) for n in ((view.get(src) or {}).get("javascript_shadowed_names") or []))
+            cur = view.container_of(cur)
         resolved_names: set[str] = set()
         for c in callees:
             resolved_names.add(view.name_of(c))
             resolved_names.add(view.qualified_name(c))
+            resolved_names.add(view.display_name(c))
         out: list[str] = []
         for call in raw:
             call = str(call).strip()
             if not call or call in out or is_noise_call(call):
+                continue
+            if call.split(".", 1)[0] in local_names:
                 continue
             tail = call.rsplit(".", 1)[-1]
             if call in resolved_names or tail in resolved_names:
@@ -501,8 +531,12 @@ class CodeStructure:
         if not name or view.type_of(target) not in SYMBOL_TYPES or is_noise_call(name):
             return []
         out: list[dict] = []
+        seen: set[str] = set()
         for node_id in view.symbol_ids():
-            if node_id == target or node_id in confirmed:
+            # Inline callbacks are transparent: a match inside one is reported
+            # under the enclosing named definition.
+            owner = view.named_ancestor(node_id)
+            if owner == target or node_id in confirmed or owner in confirmed or owner in seen:
                 continue
             raw = (view.get(node_id) or {}).get("calls") or []
             if isinstance(raw, str):
@@ -516,7 +550,8 @@ class CodeStructure:
             resolved = {view.name_of(c) for c in _unique(self.client.get_callees(node_id))}
             if name in resolved:
                 continue  # linked to another symbol of that name; not a candidate here
-            out.append({"id": node_id, "via": matching[0] if len(matching) == 1 else matching})
+            seen.add(owner)
+            out.append({"id": owner, "via": matching[0] if len(matching) == 1 else matching})
         out.sort(key=lambda entry: (view.file_of(entry["id"]),
                                     (view.get(entry["id"]) or {}).get("lines", {}).get("start") or 0,
                                     entry["id"]))

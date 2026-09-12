@@ -191,44 +191,11 @@ class UniversalCodeParser:
             # Arrow functions (JS/TS lexical_declaration / variable_declaration)
             elif node.type in lang_config.get("arrow_nodes", []):
                 variable_declarator_nodes = lang_config.get("variable_declarator_nodes", ["variable_declarator"])
-                arrow_function_nodes = lang_config.get("arrow_function_nodes", ["arrow_function"])
-                function_expression_nodes = lang_config.get("function_expression_nodes", ["function_expression"])
-                call_nodes_cfg = set(lang_config.get("call_nodes", ["call_expression"]))
-                wrapper_names = set(lang_config.get("arrow_wrapper_functions", []))
-
-                def _find_wrapped_fn(declarator):
-                    """forwardRef((...) => ...), memo((...) => ...): the component
-                    function hides inside a wrapper CALL, not directly under the
-                    declarator. Return it when the callee is a known wrapper."""
-                    call_node = next(
-                        (c for c in declarator.children if c.type in call_nodes_cfg), None
-                    )
-                    if call_node is None:
-                        return None
-                    callee = call_node.child_by_field_name("function")
-                    if callee is None:
-                        return None
-                    callee_text = callee.text.decode('utf-8', errors='replace')
-                    bare = callee_text.split(".")[-1].split("<")[0].strip()
-                    if bare not in wrapper_names:
-                        return None
-                    args_node = call_node.child_by_field_name("arguments")
-                    stack = [args_node] if args_node is not None else []
-                    while stack:
-                        cur = stack.pop()
-                        if cur.type in (arrow_function_nodes + function_expression_nodes):
-                            return cur
-                        stack.extend(getattr(cur, "children", []))
-                    return None
 
                 for child in node.children:
                     if child.type in variable_declarator_nodes:
-                        has_function_value = any(
-                            n.type in (arrow_function_nodes + function_expression_nodes)
-                            for n in child.children
-                        )
-                        wrapped_fn = None if has_function_value else _find_wrapped_fn(child)
-                        if has_function_value or wrapped_fn is not None:
+                        literal = self._declared_function(child, lang_config)
+                        if literal is not None:
                             func_info = self._extract_node_info(child, code_bytes, lang_config, override_name=True)
                             func_info['calls'] = self._extract_calls(child, code_bytes, lang_config)
                             func_info['returns'] = self._extract_returns(child, code_bytes, lang_config)
@@ -237,7 +204,8 @@ class UniversalCodeParser:
                                     child, lang_config)
                                 func_info['javascript_shadowed_names'] = shadows
                                 func_info['javascript_receiver_types'] = receivers
-                                func_info['javascript_lexical_this'] = True
+                                func_info['javascript_lexical_this'] = (
+                                    literal.type in self._node_types(lang_config, "arrow_function_nodes"))
                             func_scope = f"{scope}.{func_info['name']}" if scope else func_info['name']
                             func_info['node_name'] = func_scope
                             functions.append(func_info)
@@ -512,6 +480,15 @@ class UniversalCodeParser:
 
         body_node = next((c for c in def_node.children if c.type in body_nodes), None)
 
+        # `const f = async (a) => {...}` / `const f = useCallback((a) => ..., deps)`:
+        # the declarator has no body of its own; use the bound literal's so the
+        # signature keeps the parameter list and async/params are detected.
+        literal = None
+        if node.type in lang_config.get("variable_declarator_nodes", ["variable_declarator"]):
+            literal = self._declared_function(node, lang_config)
+            if literal is not None and body_node is None:
+                body_node = literal.child_by_field_name("body")
+
         docstring = ""
         # Python docstring
         if lang_config.get("docstrings", False) and body_node and body_node.type == lang_config.get("class_body", "block") and body_node.children:
@@ -532,6 +509,9 @@ class UniversalCodeParser:
                 signature = sig_bytes.decode('utf-8').strip(' \n\r\t:')
                 # Collapse multiple spaces and newlines
                 signature = " ".join(signature.split())
+                if literal is not None:
+                    # Newline collapse leaves `useCallback( async (...)`; tidy it.
+                    signature = signature.replace("( ", "(")
             except Exception:
                 pass
         
@@ -551,9 +531,12 @@ class UniversalCodeParser:
         is_async = False
         is_generator = False
 
+        async_keywords = lang_config.get("async_keywords", ["async"])
         if def_node.type in lang_config.get("async_function_nodes", ["async_function_definition", "async_function"]):
             is_async = True
-        elif any(c.type in lang_config.get("async_keywords", ["async"]) for c in def_node.children) or any(c.type in lang_config.get("async_keywords", ["async"]) for c in node.children):
+        elif any(c.type in async_keywords for c in def_node.children) or any(c.type in async_keywords for c in node.children):
+            is_async = True
+        elif literal is not None and any(c.type in async_keywords for c in literal.children):
             is_async = True
         elif signature.startswith('async ') or signature.startswith('async('):
             is_async = True
@@ -594,6 +577,8 @@ class UniversalCodeParser:
             return None
 
         param_node = _find_params_node(def_node) or _find_params_node(node)
+        if param_node is None and literal is not None:
+            param_node = _find_params_node(literal)
         if param_node:
             ignore_types = set(lang_config.get("param_ignore_types", ['(', ')', ',', ':', ';', 'comment']))
             raw_params = [c for c in param_node.children if c.type not in ignore_types]
@@ -818,10 +803,10 @@ class UniversalCodeParser:
             if n.type in arrow_function_nodes | function_expression_nodes:
                 return "function", n
             if n.type in arrow_containers:
+                # `const f = () => ...` and wrapper forms such as
+                # `const f = useCallback(() => ..., deps)` both define `f`.
                 for d in n.children:
-                    if d.type in variable_declarators and any(
-                        c.type in arrow_function_nodes | function_expression_nodes for c in d.children
-                    ):
+                    if d.type in variable_declarators and self._declared_function(d, lang_config) is not None:
                         return "function", d
             return None, None
 
@@ -887,8 +872,8 @@ class UniversalCodeParser:
                         _scan(body, child_scope, False)
                     continue
 
-                override = wrap.type in arrow_containers
-                f_info = self._extract_node_info(wrap, code_bytes, lang_config, override_name=override)
+                is_declarator = wrap.type in variable_declarators
+                f_info = self._extract_node_info(wrap, code_bytes, lang_config, override_name=is_declarator)
                 if wrap.type in arrow_function_nodes | function_expression_nodes:
                     f_info["name"] = bare
                 f_info["node_name"] = child_scope
@@ -898,10 +883,9 @@ class UniversalCodeParser:
                     shadows, receivers = self._javascript_context_from_node(wrap, lang_config)
                     f_info['javascript_shadowed_names'] = shadows
                     f_info['javascript_receiver_types'] = receivers
-                    value = (wrap.child_by_field_name("value")
-                             if wrap.type in variable_declarators else wrap)
+                    literal = self._declared_function(wrap, lang_config) if is_declarator else wrap
                     f_info['javascript_lexical_this'] = (
-                        value is not None and value.type in arrow_function_nodes)
+                        literal is not None and literal.type in arrow_function_nodes)
                 functions.append(f_info)
                 if body is not None:
                     _scan(body, child_scope, False)
@@ -1344,7 +1328,8 @@ class UniversalCodeParser:
 
         target = node
         if node.type in ("variable_declarator", "field_definition", "public_field_definition"):
-            value = node.child_by_field_name("value")
+            # `const f = useCallback((a) => ...)`: the params/body live on the literal.
+            value = self._declared_function(node, lang_config) or node.child_by_field_name("value")
             if value is not None:
                 target = value
         params = target.child_by_field_name("parameters")
@@ -1427,9 +1412,9 @@ class UniversalCodeParser:
                     name_node = child.child_by_field_name("name")
                     bound_names = self._javascript_bound_names(name_node)
                     value = child.child_by_field_name("value")
-                    callable_value = value is not None and value.type in (
-                        set(lang_config.get("arrow_function_nodes", []))
-                        | set(lang_config.get("function_expression_nodes", [])))
+                    # A binding that *is* a function (directly or via a wrapper such
+                    # as useCallback) is a definition, not a shadowing variable.
+                    callable_value = self._declared_function(child, lang_config) is not None
                     if not callable_value:
                         shadows.update(bound_names)
                         for bound_name in bound_names:
@@ -1853,16 +1838,25 @@ class UniversalCodeParser:
                     )
                 if body is not None:
                     scan_root = body
-            elif definition.type == "variable_declarator":
-                value = definition.child_by_field_name("value")
-                if value is not None and value.type in set(
-                        lang_config.get("arrow_function_nodes", [])) | set(
-                        lang_config.get("function_expression_nodes", [])):
-                    body = value.child_by_field_name("body")
+            elif definition.type in self._node_types(lang_config, "variable_declarator_nodes"):
+                # `const f = () => ...` or `const f = useCallback(() => ..., deps)`:
+                # the binding's calls are the literal's body calls. Scanning from
+                # the declarator would prune the literal as a callback and lose them.
+                literal = self._declared_function(definition, lang_config)
+                if literal is not None:
+                    body = literal.child_by_field_name("body")
                     if body is not None:
                         scan_root = body
 
+        declarator_nodes = self._node_types(lang_config, "variable_declarator_nodes")
+        callback_types = self._function_literal_types(lang_config)
+
         def walk(node):
+            if node.type in declarator_nodes and self._declared_function(node, lang_config) is not None:
+                # `const f = useCallback(() => ..., deps)` defines `f`; its body
+                # calls belong to the `f` node, and the wrapper call is not a
+                # dependency of the enclosing function.
+                return
             if node.type in call_nodes:
                 func_node = None
                 for n in node.children:
@@ -1880,8 +1874,6 @@ class UniversalCodeParser:
                         _add_call(tag_name)
             for child in node.children:
                 if child.type in prune_nodes:
-                    callback_types = (set(lang_config.get("arrow_function_nodes", []))
-                                      | set(lang_config.get("function_expression_nodes", [])))
                     if (child.type in callback_types
                             and node.type in {"arguments", "argument_list", "return_statement"}):
                         _add_call(
@@ -1899,6 +1891,64 @@ class UniversalCodeParser:
         if isinstance(value, str):
             return {value}
         return set(value or [])
+
+    @classmethod
+    def _function_literal_types(cls, lang_config: dict) -> set:
+        """Node types of anonymous function literals (arrow / function expressions)."""
+        return (cls._node_types(lang_config, "arrow_function_nodes")
+                | cls._node_types(lang_config, "function_expression_nodes"))
+
+    @classmethod
+    def _wrapped_function(cls, declarator, lang_config: dict):
+        """The function literal hidden inside a known wrapper call.
+
+        ``const Comp = memo((props) => ...)``, ``const cb = useCallback(() => ...)``:
+        the binding *is* the function, but the literal sits inside the arguments
+        of a wrapper CALL rather than directly under the declarator. Returns the
+        literal when the callee is listed in ``arrow_wrapper_functions``.
+        """
+        wrapper_names = set(lang_config.get("arrow_wrapper_functions", []))
+        if not wrapper_names or declarator is None:
+            return None
+        call_nodes = cls._node_types(lang_config, "call_nodes")
+        call_node = next((c for c in declarator.children if c.type in call_nodes), None)
+        if call_node is None:
+            return None
+        callee = call_node.child_by_field_name("function")
+        if callee is None:
+            return None
+        callee_text = callee.text.decode('utf-8', errors='replace')
+        bare = callee_text.split(".")[-1].split("<")[0].strip()
+        if bare not in wrapper_names:
+            return None
+        literal_types = cls._function_literal_types(lang_config)
+        args_node = call_node.child_by_field_name("arguments")
+        for arg in (args_node.children if args_node is not None else ()):
+            if arg.type in literal_types:
+                return arg
+            # `memo(forwardRef((props, ref) => ...))`: one level of nesting.
+            if arg.type in call_nodes:
+                inner_args = arg.child_by_field_name("arguments")
+                for inner in (inner_args.children if inner_args is not None else ()):
+                    if inner.type in literal_types:
+                        return inner
+        return None
+
+    @classmethod
+    def _declared_function(cls, declarator, lang_config: dict):
+        """Function literal bound by a variable declarator, directly or via a wrapper.
+
+        ``const f = () => ...`` / ``const f = function () {}`` / ``const f = memo(() => ...)``
+        all make ``f`` a function definition. Returns the literal node or ``None``
+        when the declarator holds a plain value (``const rows = items.map(...)``).
+        """
+        if declarator is None:
+            return None
+        literal_types = cls._function_literal_types(lang_config)
+        direct = next((c for c in declarator.children if c.type in literal_types), None)
+        if direct is not None:
+            return direct
+        return cls._wrapped_function(declarator, lang_config)
 
     @classmethod
     def _is_call_node(cls, node, lang_config: dict) -> bool:
